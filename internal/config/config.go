@@ -1,0 +1,206 @@
+package config
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+const CurrentVersion = 1
+
+// Config 是可手改的配置文件内容 ~/.grscan/config.json
+type Config struct {
+	Version      int      `json:"version"`
+	Roots        []string `json:"roots"`
+	ExcludeNames []string `json:"exclude_names"`
+	ExcludePaths []string `json:"exclude_paths"`
+	MaxDepth     int      `json:"max_depth"`
+	Jobs         int      `json:"jobs"`
+	Fast         bool     `json:"fast"`
+	Deep         bool     `json:"deep"`
+	GitExe       string   `json:"git_exe"`
+}
+
+// DefaultExcludeNames 默认跳过的噪音目录名（命中即不再下钻）。
+// 全部可配，改配置文件即可。
+var DefaultExcludeNames = []string{
+	"node_modules",
+	"vendor",
+	".cache",
+	"__pycache__",
+	"$Recycle.Bin",
+	"System Volume Information",
+	"Windows",
+	"Program Files",
+	"Program Files (x86)",
+	"AppData",
+	"Temp",
+	"Cache",
+	".gradle",
+	".m2",
+	".terraform",
+}
+
+func Default() *Config {
+	c := &Config{
+		Version:      CurrentVersion,
+		Roots:        guessRoots(),
+		ExcludeNames: append([]string{}, DefaultExcludeNames...),
+		ExcludePaths: []string{},
+		MaxDepth:     10,
+		Jobs:         defaultJobs(),
+		GitExe:       "",
+	}
+	return c
+}
+
+func defaultJobs() int {
+	n := runtime.NumCPU()
+	if n < 4 {
+		n = 4
+	}
+	if n > 16 {
+		n = 16
+	}
+	return n
+}
+
+// guessRoots 收集一些常见的放代码的位置，只保留真实存在的。
+func guessRoots() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return []string{}
+	}
+	cands := []string{
+		filepath.Join(home, "IdeaProjects"),
+		filepath.Join(home, "Desktop"),
+		filepath.Join(home, "Documents"),
+		filepath.Join(home, "Downloads"),
+		filepath.Join(home, "source"),
+		filepath.Join(home, "sources"),
+		filepath.Join(home, "repos"),
+		filepath.Join(home, "projects"),
+		filepath.Join(home, "code"),
+		filepath.Join(home, "dev"),
+		filepath.Join(home, "go", "src"),
+	}
+	out := []string{}
+	for _, c := range cands {
+		if st, err := os.Stat(c); err == nil && st.IsDir() {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// ResolveHome 确定数据目录：命令行 > 环境变量 GRSCAN_HOME > ~/.grscan
+func ResolveHome(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if v := strings.TrimSpace(os.Getenv("GRSCAN_HOME")); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".grscan"
+	}
+	return filepath.Join(home, ".grscan")
+}
+
+func Paths(home string) (configPath, statePath string) {
+	return filepath.Join(home, "config.json"), filepath.Join(home, "state.json")
+}
+
+// Load 读取配置；不存在则生成默认配置并落盘。
+func Load(configPath string) (*Config, error) {
+	b, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c := Default()
+			if werr := Save(configPath, c); werr == nil {
+				return c, nil
+			}
+			return c, nil
+		}
+		return nil, err
+	}
+	var c Config
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, err
+	}
+	if c.Version == 0 {
+		c.Version = CurrentVersion
+	}
+	if c.MaxDepth <= 0 {
+		c.MaxDepth = 10
+	}
+	if c.Jobs <= 0 {
+		c.Jobs = defaultJobs()
+	}
+	if len(c.ExcludeNames) == 0 && len(c.Roots) == 0 {
+		c.ExcludeNames = append([]string{}, DefaultExcludeNames...)
+	}
+	return &c, nil
+}
+
+// Save 原子写入（先写临时文件再重命名），避免中断写出半截 JSON。
+func Save(configPath string, c *Config) error {
+	if c.Version == 0 {
+		c.Version = CurrentVersion
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	tmp := configPath + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, configPath)
+}
+
+// AddRoot 往配置里追加一个扫描根（去重）。
+func AddRoot(c *Config, root string) (bool, string) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return false, root
+	}
+	for _, r := range c.Roots {
+		if sameDir(r, abs) {
+			return false, abs
+		}
+	}
+	c.Roots = append(c.Roots, abs)
+	return true, abs
+}
+
+func RemoveRoot(c *Config, root string) (bool, string) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return false, root
+	}
+	kept := c.Roots[:0]
+	removed := false
+	for _, r := range c.Roots {
+		if sameDir(r, abs) {
+			removed = true
+			continue
+		}
+		kept = append(kept, r)
+	}
+	c.Roots = kept
+	return removed, abs
+}
+
+func sameDir(a, b string) bool {
+	aa, _ := filepath.Abs(a)
+	bb, _ := filepath.Abs(b)
+	return strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
+}
