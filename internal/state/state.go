@@ -84,6 +84,8 @@ type DirRule struct {
 	Note string `json:"note,omitempty"`
 }
 
+// 作用域不落盘。grscan 是从 terminal 进去的一个会话，焦点只在会话内存活，
+// 每次进来按当前目录重新推断 —— 不靠配置文件记上次站哪。
 type State struct {
 	Version   int          `json:"version"`
 	UpdatedAt string       `json:"updated_at"`

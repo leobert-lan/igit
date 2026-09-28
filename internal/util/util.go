@@ -186,6 +186,29 @@ func PadRight(s string, width int) string {
 	return s + strings.Repeat(" ", width-n)
 }
 
+// PadRightDisplay 按显示宽度补齐空格：中文占两列，超出时至少留两格空隙，
+// 免得数字贴到名字上。
+func PadRightDisplay(s string, width int) string {
+	w := DisplayWidth(s)
+	if w >= width {
+		return s + "  "
+	}
+	return s + strings.Repeat(" ", width-w)
+}
+
+// DisplayWidth 粗略的显示宽度：CJK 与全角记两列，其余记一列。
+func DisplayWidth(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0x2E7F {
+			n += 2
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 // Truncate 截断到指定宽度，超出部分用 … 收尾。
 func Truncate(s string, width int) string {
 	r := []rune(s)

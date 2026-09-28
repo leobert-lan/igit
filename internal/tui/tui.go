@@ -78,6 +78,12 @@ type model struct {
 	roots []string
 	save  func() error
 
+	// subset 限定这次面板能碰到的仓库（按 Repo.ID 索引）。nil = 全集。
+	// 绝不为限定范围去改 st.Repos —— 那会污染状态并被 save() 写回磁盘。
+	subset map[string]bool
+	// scopeLabel 当前作用域的名字，钉在标题栏，让人随时知道自己在哪一层。
+	scopeLabel string
+
 	// 会话内的临时展开/折叠，不写盘
 	expanded map[string]bool
 	tempFold map[string]bool
@@ -97,8 +103,10 @@ type model struct {
 }
 
 // Run 启动交互面板。statusPreset 决定初始视图。
-func Run(st *state.State, roots []string, query, statusPreset string, save func() error) error {
-	m := newModel(st, roots, query, statusPreset, save)
+// subset 为空表示全集；非空时面板只在Scope这批仓库里工作，但读写的仍是 st 里的同一批对象，
+// 所以标注结果照常落盘，只是别的仓库不出现在屏幕上。
+func Run(st *state.State, roots []string, query, statusPreset string, subset []*state.Repo, scopeLabel string, save func() error) error {
+	m := newModel(st, roots, query, statusPreset, subset, scopeLabel, save)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return err
@@ -106,12 +114,19 @@ func Run(st *state.State, roots []string, query, statusPreset string, save func(
 	return nil
 }
 
-func newModel(st *state.State, roots []string, query, statusPreset string, save func() error) model {
+func newModel(st *state.State, roots []string, query, statusPreset string, subset []*state.Repo, scopeLabel string, save func() error) model {
 	m := model{
 		st: st, roots: roots, save: save, query: strings.ToLower(query),
 		width: 120, height: 30,
-		expanded: map[string]bool{},
-		tempFold: map[string]bool{},
+		expanded:   map[string]bool{},
+		tempFold:   map[string]bool{},
+		scopeLabel: scopeLabel,
+	}
+	if len(subset) > 0 {
+		m.subset = make(map[string]bool, len(subset))
+		for _, r := range subset {
+			m.subset[r.ID] = true
+		}
 	}
 	switch statusPreset {
 	case "ignored":
@@ -137,6 +152,10 @@ func newModel(st *state.State, roots []string, query, statusPreset string, save 
 func (m *model) inScope(r *state.Repo) bool {
 	// 被 hide 的目录，任何视图都不出现
 	if m.st.IsHidden(r.Path) {
+		return false
+	}
+	// 限定了作用域就不越界：这次只处理这一批，别的仓库当不存在
+	if m.subset != nil && !m.subset[r.ID] {
 		return false
 	}
 	switch m.sc {
@@ -645,14 +664,37 @@ var (
 	stKeyHead = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
 )
 
+// tailTrunc 从左侧截断：路径的尾巴信息量最大，D:\work\a\b\opensource 要留住 opensource。
+func tailTrunc(s string, w int) string {
+	if w <= 1 || util.DisplayWidth(s) <= w {
+		return s
+	}
+	runes := []rune(s)
+	out := []rune{}
+	width := 1 // 开头的省略号占一位
+	for i := len(runes) - 1; i >= 0; i-- {
+		cw := util.DisplayWidth(string(runes[i]))
+		if width+cw > w {
+			break
+		}
+		width += cw
+		out = append([]rune{runes[i]}, out...)
+	}
+	return "…" + string(out)
+}
+
 func (m model) View() string {
 	if m.help {
 		return m.helpView()
 	}
 	var b strings.Builder
 
-	head := fmt.Sprintf(" grscan triage   视图[%s]  共 %d  已选 %d  %s",
-		m.sc.String(), len(m.rows), m.selectedCount(), dirtyMark(m.changed))
+	verb := "grscan triage"
+	if m.scopeLabel != "" {
+		verb += " · " + tailTrunc(m.scopeLabel, maxInt(18, m.width-50))
+	}
+	head := fmt.Sprintf(" %s   视图[%s]  共 %d  已选 %d  %s",
+		verb, m.sc.String(), len(m.rows), m.selectedCount(), dirtyMark(m.changed))
 	b.WriteString(stTitle.Render(head) + "\n")
 	b.WriteString(stDim.Render(m.columnHeader()) + "\n")
 

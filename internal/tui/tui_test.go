@@ -52,7 +52,7 @@ func typeText(m model, s string) model {
 
 // 默认视图只显示待处理，不含已处理与已忽略
 func TestDefaultScopeExcludesDoneAndIgnored(t *testing.T) {
-	m := newModel(demoState(), []string{"C:/repos"}, "", state.StatusNew, func() error { return nil })
+	m := newModel(demoState(), []string{"C:/repos"}, "", state.StatusNew, nil, "", func() error { return nil })
 	if len(m.rows) != 2 {
 		t.Fatalf("待处理视图应有 2 行，实际 %d", len(m.rows))
 	}
@@ -69,7 +69,7 @@ func TestDefaultScopeExcludesDoneAndIgnored(t *testing.T) {
 
 // v 键循环切换视图
 func TestScopeCycle(t *testing.T) {
-	m := newModel(demoState(), []string{"C:/repos"}, "", "", func() error { return nil })
+	m := newModel(demoState(), []string{"C:/repos"}, "", "", nil, "", func() error { return nil })
 	m = runeKey(m, 'v')
 	if m.sc != scopeAll {
 		t.Fatalf("第一次 v 应切到全部，实际 %v", m.sc)
@@ -90,7 +90,7 @@ func TestScopeCycle(t *testing.T) {
 func TestGroupAndDoneFlow(t *testing.T) {
 	st := demoState()
 	saved := false
-	m := newModel(st, []string{"C:/repos"}, "", "", func() error { saved = true; return nil })
+	m := newModel(st, []string{"C:/repos"}, "", "", nil, "", func() error { saved = true; return nil })
 
 	m = runeKey(m, 'G')
 	if m.mode != inGroup {
@@ -132,7 +132,7 @@ func TestGroupAndDoneFlow(t *testing.T) {
 // 忽略：退出待处理视图，并能切回来看到
 func TestIgnoreFlow(t *testing.T) {
 	st := demoState()
-	m := newModel(st, []string{"C:/repos"}, "", "", func() error { return nil })
+	m := newModel(st, []string{"C:/repos"}, "", "", nil, "", func() error { return nil })
 	target := m.rows[m.cursor].r
 	m = runeKey(m, 'i')
 	if !target.Ignored {
@@ -150,7 +150,7 @@ func TestIgnoreFlow(t *testing.T) {
 
 // 过滤输入 -> Enter 生效 -> c 清除
 func TestFilterFlow(t *testing.T) {
-	m := newModel(demoState(), []string{"C:/repos"}, "", "", func() error { return nil })
+	m := newModel(demoState(), []string{"C:/repos"}, "", "", nil, "", func() error { return nil })
 	m = runeKey(m, 'F')
 	m = typeText(m, "beta")
 	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
@@ -163,9 +163,44 @@ func TestFilterFlow(t *testing.T) {
 	}
 }
 
+// 限定作用域：面板只认这批仓库，但改的仍是 st 里的同一批对象，注解照常落盘
+func TestSubsetLimitsPanel(t *testing.T) {
+	st := demoState()
+	subset := []*state.Repo{st.Repos[0], st.Repos[2]} // alpha + gamma（gamma 已处理）
+	saved := false
+	m := newModel(st, []string{"C:/repos"}, "", "all", subset, "file:C:/repos", func() error { saved = true; return nil })
+
+	if len(m.rows) != 2 {
+		t.Fatalf("全部视图下限定作用域应只剩 2 行，实际 %d", len(m.rows))
+	}
+	for _, rw := range m.rows {
+		if rw.r.Name != "alpha" && rw.r.Name != "gamma" {
+			t.Fatalf("越界的仓库出现了: %s", rw.r.Name)
+		}
+	}
+	if !strings.Contains(m.View(), "file:C:/repos") {
+		t.Fatalf("标题栏应显示当前作用域:\n%s", m.View())
+	}
+
+	// 在限定范围内打标签：改的是 st 里的真身，不是副本
+	m = runeKey(m, 'T')
+	m = typeText(m, "待推送")
+	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(st.Repos[0].Tags) != 1 || st.Repos[0].Tags[0] != "待推送" {
+		t.Fatalf("标注没落到状态里: %v", st.Repos[0].Tags)
+	}
+	if len(st.Repos[1].Tags) != 0 {
+		t.Fatalf("范围外的仓库被改到了: %v", st.Repos[1].Tags)
+	}
+	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlS}) // 显式保存
+	if !saved {
+		t.Fatal("Ctrl-S 应触发保存")
+	}
+}
+
 // View 在任何状态下都不能渲染出空字符串，也不能 panic
 func TestViewNeverEmpty(t *testing.T) {
-	m := newModel(demoState(), []string{"C:/repos"}, "", "", func() error { return nil })
+	m := newModel(demoState(), []string{"C:/repos"}, "", "", nil, "", func() error { return nil })
 	if m.View() == "" {
 		t.Fatal("View 不应为空")
 	}
@@ -197,7 +232,7 @@ func TestFoldedRow(t *testing.T) {
 	}
 	st.Fold("C:/repos/ryxl", "")
 
-	m := newModel(st, []string{"C:/repos", "C:/work"}, "", "", func() error { return nil })
+	m := newModel(st, []string{"C:/repos", "C:/work"}, "", "", nil, "", func() error { return nil })
 	if len(m.rows) != 2 {
 		t.Fatalf("3 个仓库应折叠成 1 行，加上 solo 共 2 行，实际 %d", len(m.rows))
 	}
@@ -245,7 +280,7 @@ func TestToggleFold(t *testing.T) {
 		mkRepo("C:/work/solo"),
 	}
 	st.Fold("C:/repos/ryxl", "")
-	m := newModel(st, []string{"C:/repos", "C:/work"}, "", "", func() error { return nil })
+	m := newModel(st, []string{"C:/repos", "C:/work"}, "", "", nil, "", func() error { return nil })
 
 	idx := -1
 	for i, rw := range m.rows {
@@ -276,7 +311,7 @@ func TestHiddenDirExcluded(t *testing.T) {
 		mkRepo("C:/work/solo"),
 	}
 	st.Hide("C:/repos/ryxl", "")
-	m := newModel(st, []string{"C:/repos", "C:/work"}, "", "", func() error { return nil })
+	m := newModel(st, []string{"C:/repos", "C:/work"}, "", "", nil, "", func() error { return nil })
 	if len(m.rows) != 1 {
 		t.Fatalf("隐藏 ryxl 后应只剩 1 行，实际 %d", len(m.rows))
 	}
@@ -295,7 +330,7 @@ func TestExistingHints(t *testing.T) {
 	st := demoState()
 	st.Repos[1].Group = "旧分组"
 	st.Repos[1].Tags = []string{"老标签"}
-	m := newModel(st, []string{"C:/repos"}, "", "", func() error { return nil })
+	m := newModel(st, []string{"C:/repos"}, "", "", nil, "", func() error { return nil })
 	m = runeKey(m, 'G')
 	if !strings.Contains(m.View(), "已有分组") {
 		t.Fatalf("输入分组时应提示已有分组:\n%s", m.View())
