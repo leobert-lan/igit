@@ -300,14 +300,25 @@ func (s *State) CountMissing() int {
 
 // Find 支持三种定位方式：完整 ID / ID 或名字的片段 / 精确名字。
 // 不做 `%1` 这类序号，因为 list 输出本身不稳定，容易误伤。
+//
+// 它搜的是全清单。要在限定集合里搜（当前作用域圈定的那批）用 FindIn。
 func (s *State) Find(q string) []*Repo {
+	return FindIn(s.Repos, q)
+}
+
+// FindIn 只在给定集合里搜。
+//
+// 作用域圈定候选池之后，关键字就该只在这里解析 —— 池里没有就是没有，
+// 不能退回去全集找：站在某个目录里敲一条命令，结果打开别的盘上的仓库，
+// 这种事错一次就够受的。
+func FindIn(repos []*Repo, q string) []*Repo {
 	q = strings.TrimSpace(q)
 	if q == "" {
 		return nil
 	}
 	lower := strings.ToLower(strings.ReplaceAll(q, `\`, "/"))
 	var exact, partial []*Repo
-	for _, r := range s.Repos {
+	for _, r := range repos {
 		if strings.EqualFold(r.ID, lower) || strings.EqualFold(r.Name, q) {
 			exact = append(exact, r)
 			continue

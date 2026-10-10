@@ -54,6 +54,24 @@ type Scope struct {
 	Source string
 }
 
+// 节点类型分类。
+type NodeType string
+
+const (
+	NodeRoot  NodeType = "root"
+	NodeDir   NodeType = "dir"
+	NodeRepo  NodeType = "repo"
+	NodeGroup NodeType = "group"
+	NodeTag   NodeType = "tag"
+)
+
+// TrailStep 记录来时路的一步。
+type TrailStep struct {
+	Type  NodeType
+	Ident string
+	Label string
+}
+
 // Item 是 ls 列出的一个子项。
 type Item struct {
 	Facet   string // file | group | tag | repo，供分区渲染
@@ -75,7 +93,8 @@ type Totals struct {
 // Resolved 是每次现算出来的结果，不进字符串。
 type Resolved struct {
 	Scope     Scope
-	Kind      string // root | collection | repo
+	Kind      string // root | collection | repo (保留兼容)
+	NodeType  NodeType
 	Repos     []*state.Repo
 	Children  []Item
 	Totals    Totals
@@ -85,6 +104,20 @@ type Resolved struct {
 	// 它既是"这里本身"，又是别的仓库的父目录 —— 不指定维度就没法确定看哪个视角，
 	// 所以默认给你集合视角（里面有什么），自身状态单独标出来，想看它自己用 repo:。
 	Self *state.Repo
+}
+
+// TargetRepo 返回当前节点直接代表的具体仓库（若站在 Repo 节点，或者单仓目录/Self）。
+func (r *Resolved) TargetRepo() *state.Repo {
+	if r == nil {
+		return nil
+	}
+	if r.Self != nil {
+		return r.Self
+	}
+	if (r.NodeType == NodeRepo || r.Kind == KindRepo) && len(r.Repos) == 1 {
+		return r.Repos[0]
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------- 序列化
@@ -196,6 +229,49 @@ func (s Scope) String() string {
 	return strings.Join(parts, "/")
 }
 
+// Trail 解析来时路步骤。
+func (s Scope) Trail() []TrailStep {
+	steps := []TrailStep{{Type: NodeRoot, Ident: "/", Label: "/"}}
+	for _, g := range s.Segs {
+		var nt NodeType
+		switch g.Dim {
+		case DimFile:
+			nt = NodeDir
+		case DimGroup:
+			nt = NodeGroup
+		case DimTag:
+			nt = NodeTag
+		case DimRepo:
+			nt = NodeRepo
+		default:
+			nt = NodeRepo
+		}
+		label := g.Ident
+		if g.Dim != DimRepo {
+			label = g.Dim + ":" + g.Ident
+		}
+		steps = append(steps, TrailStep{
+			Type:  nt,
+			Ident: g.Ident,
+			Label: label,
+		})
+	}
+	return steps
+}
+
+// TrailString 输出易读的来时路，例如 "/ -> group:工作 -> scan_git"
+func (s Scope) TrailString() string {
+	steps := s.Trail()
+	if len(steps) == 1 {
+		return "/"
+	}
+	var b []string
+	for _, st := range steps {
+		b = append(b, st.Label)
+	}
+	return strings.Join(b, " -> ")
+}
+
 func (s Scope) IsRoot() bool { return len(s.Segs) == 0 }
 
 // Parent 先段内降一级，没级可降就去整段。
@@ -231,6 +307,18 @@ func (s Scope) DescendFile(sub string) Scope {
 	last := out[len(out)-1]
 	out[len(out)-1] = Seg{Dim: DimFile, Ident: filepath.Join(last.Ident, sub)}
 	return Scope{Segs: out, Source: s.Source}
+}
+
+// BaseDir 返回这个作用域的目录基准：串里最深的那个 file 段。
+// 没有 file 段（虚拟根 / group: / tag:）时返回空串 —— 调用方该退回进程 cwd 并明说，
+// 不能拿 cwd 冒充作用域，否则会把规则写到完全不相干的盘上去。
+func (s Scope) BaseDir() string {
+	for i := len(s.Segs) - 1; i >= 0; i-- {
+		if s.Segs[i].Dim == DimFile {
+			return s.Segs[i].Ident
+		}
+	}
+	return ""
 }
 
 // LastIsFile 判断最后一段是不是目录维度（决定裸名字该当子目录还是仓库）。
@@ -319,9 +407,25 @@ func Resolve(sc Scope, st *state.State) (*Resolved, error) {
 		cur = rest
 	}
 
-	res := &Resolved{Scope: sc, Kind: kind, Repos: cur, Self: self, Freshness: Freshness(st)}
+	nodeType := NodeRoot
+	switch {
+	case !have:
+		nodeType = NodeRoot
+	case kind == KindRepo:
+		nodeType = NodeRepo
+	case last.Dim == DimGroup:
+		nodeType = NodeGroup
+	case last.Dim == DimTag:
+		nodeType = NodeTag
+	case last.Dim == DimFile:
+		nodeType = NodeDir
+	default:
+		nodeType = NodeRepo
+	}
+
+	res := &Resolved{Scope: sc, Kind: kind, NodeType: nodeType, Repos: cur, Self: self, Freshness: Freshness(st)}
 	res.Totals = totalsOf(cur)
-	res.Children = childrenOf(sc, cur, kind)
+	res.Children = childrenOf(sc, cur, Visible(st), kind)
 	return res, nil
 }
 
@@ -447,11 +551,14 @@ func Freshness(st *state.State) string {
 
 // ---------------------------------------------------------------- 子项
 
-func childrenOf(sc Scope, repos []*state.Repo, kind string) []Item {
+func childrenOf(sc Scope, repos []*state.Repo, all []*state.Repo, kind string) []Item {
 	switch kind {
 	case KindRoot:
 		return rootChildren(repos)
 	case KindRepo:
+		if len(repos) == 1 {
+			return nestedChildren(sc, all, repos[0].Path)
+		}
 		return nil
 	}
 	last := sc.Segs[len(sc.Segs)-1]
@@ -459,6 +566,21 @@ func childrenOf(sc Scope, repos []*state.Repo, kind string) []Item {
 		return dirChildren(sc, repos, last.Ident)
 	}
 	return repoChildren(sc, repos)
+}
+
+func nestedChildren(sc Scope, all []*state.Repo, parentPath string) []Item {
+	base := util.NormalizePath(parentPath)
+	var nested []*state.Repo
+	for _, r := range all {
+		rp := util.NormalizePath(r.Path)
+		if rp != base && util.HasPrefixPath(rp, base) {
+			nested = append(nested, r)
+		}
+	}
+	if len(nested) == 0 {
+		return nil
+	}
+	return repoChildren(sc, nested)
 }
 
 // rootChildren 列出三个维度入口，各带数量。

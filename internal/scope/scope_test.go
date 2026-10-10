@@ -257,3 +257,49 @@ func names(in []*state.Repo) []string {
 	}
 	return out
 }
+
+func TestTrailAndNodeType(t *testing.T) {
+	st := fixture()
+
+	// 1. Root
+	rootSc := mustParse(t, "")
+	if got := rootSc.TrailString(); got != "/" {
+		t.Fatalf("根 TrailString() = %q, 期望 /", got)
+	}
+	resRoot, err := Resolve(rootSc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resRoot.NodeType != NodeRoot {
+		t.Fatalf("根 NodeType = %v, 期望 %v", resRoot.NodeType, NodeRoot)
+	}
+
+	// 2. Group
+	grpSc := mustParse(t, "group:工作")
+	if got := grpSc.TrailString(); got != "/ -> group:工作" {
+		t.Fatalf("Group TrailString() = %q", got)
+	}
+	resGrp, err := Resolve(grpSc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resGrp.NodeType != NodeGroup {
+		t.Fatalf("Group NodeType = %v, 期望 %v", resGrp.NodeType, NodeGroup)
+	}
+
+	// 3. Repo inside Group
+	repoSc := mustParse(t, "group:工作/foo")
+	if got := repoSc.TrailString(); got != "/ -> group:工作 -> foo" {
+		t.Fatalf("Repo TrailString() = %q", got)
+	}
+	resRepo, err := Resolve(repoSc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resRepo.NodeType != NodeRepo {
+		t.Fatalf("Repo NodeType = %v, 期望 %v", resRepo.NodeType, NodeRepo)
+	}
+	if resRepo.TargetRepo() == nil || resRepo.TargetRepo().Name != "foo" {
+		t.Fatalf("TargetRepo() 错误: %+v", resRepo.TargetRepo())
+	}
+}

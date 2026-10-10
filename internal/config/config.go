@@ -10,7 +10,7 @@ import (
 
 const CurrentVersion = 1
 
-// Config 是可手改的配置文件内容 ~/.grscan/config.json
+// Config 是可手改的配置文件内容 ~/.igit/config.json
 type Config struct {
 	Version      int      `json:"version"`
 	Roots        []string `json:"roots"`
@@ -21,6 +21,13 @@ type Config struct {
 	Fast         bool     `json:"fast"`
 	Deep         bool     `json:"deep"`
 	GitExe       string   `json:"git_exe"`
+
+	// TigExe：tig 的完整路径。留空则从 PATH 里找。
+	TigExe string `json:"tig_exe"`
+	// TermCmd：拉起 tig 的终端命令模板，留空用系统默认方式。
+	// 占位符 {dir} = 仓库目录，{cmd} = 完整的 tig 命令行（路径已按需加引号）。
+	// 例：wt.exe -d "{dir}" {cmd}   或   wt.exe -w new -d "{dir}" {cmd}
+	TermCmd string `json:"term_cmd"`
 }
 
 // DefaultExcludeNames 默认跳过的噪音目录名（命中即不再下钻）。
@@ -95,19 +102,30 @@ func guessRoots() []string {
 	return out
 }
 
-// ResolveHome 确定数据目录：命令行 > 环境变量 GRSCAN_HOME > ~/.grscan
+// ResolveHome 确定数据目录：命令行 > 环境变量 IGIT_HOME / GRSCAN_HOME > ~/.igit (兼容 ~/.grscan)
 func ResolveHome(explicit string) string {
 	if explicit != "" {
 		return explicit
+	}
+	if v := strings.TrimSpace(os.Getenv("IGIT_HOME")); v != "" {
+		return v
 	}
 	if v := strings.TrimSpace(os.Getenv("GRSCAN_HOME")); v != "" {
 		return v
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".grscan"
+		return ".igit"
 	}
-	return filepath.Join(home, ".grscan")
+	igitDir := filepath.Join(home, ".igit")
+	if _, err := os.Stat(igitDir); err == nil {
+		return igitDir
+	}
+	grscanDir := filepath.Join(home, ".grscan")
+	if _, err := os.Stat(grscanDir); err == nil {
+		return grscanDir
+	}
+	return igitDir
 }
 
 func Paths(home string) (configPath, statePath string) {

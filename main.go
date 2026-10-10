@@ -16,10 +16,12 @@ import (
 	"grscan/internal/config"
 	"grscan/internal/export"
 	"grscan/internal/gitinfo"
+	"grscan/internal/pick"
 	"grscan/internal/render"
 	"grscan/internal/scan"
 	"grscan/internal/scope"
 	"grscan/internal/state"
+	"grscan/internal/tig"
 	"grscan/internal/tree"
 	"grscan/internal/tui"
 	"grscan/internal/util"
@@ -29,14 +31,14 @@ import (
 
 const version = "0.1.0"
 
-const usageText = `grscan - 本地 git 仓库扫描与整理工具
+const usageText = `igit - 本地 git 仓库扫描与整理工具
 
 用法:
-  grscan [--home <dir>] [<命令>] [选项]
+  igit [--home <dir>] [<命令>] [选项]
 
 进会话:
-  grscan               进去待着。提示符带当前作用域，Tab 补全，exit 退出
-  grscan <命令>        一次性执行一条就出来，给脚本和管道留的口子
+  igit                 进去待着。提示符带当前作用域，Tab 补全，exit 退出
+  igit <命令>          一次性执行一条就出来，给脚本和管道留的口子
 
 作用域命令（导航，会话内）:
   cd <作用域>              走进去，例: cd tag:待推送
@@ -54,14 +56,19 @@ const usageText = `grscan - 本地 git 仓库扫描与整理工具
   ":" 与 "#" 都认，输出统一用 ":"
 
 数据命令（在当前作用域这批仓库里生效）:
-  scan                     扫描配置的根目录，并入状态文件
+  scan                     扫描配置的根目录（在目录/仓库下原位刷新），并入状态文件
   list                     列出仓库（默认只看"待处理"），路径默认显示完整
   tree                     按磁盘目录树展开仓库，看空间分布
   triage (tui)             交互式面板，逐个判别/分组/归档
-  set <关键字>             给匹配的仓库设置分组/状态/标签/备注/忽略
-  dupes                    按远端地址找重复克隆
-  stats                    统计概览
-  open <关键字>            在资源管理器里打开目录
+  group [list|new|set]     管理分组，单仓下直接 group set <名>
+  tag [list|add|rm]        管理标签，单仓下直接 tag add <标签>
+  status [状态]            查看或设置状态 (new|active|done|archived)
+  note [内容]              查看或记录备注
+  set <关键字>             批量设置分组/状态/标签/备注/忽略
+  dupes                    查找重复克隆（单仓下查全盘克隆副本）
+  stats                    统计概览（单仓下看仓库画像）
+  open [关键字]            在资源管理器里打开目录（单仓下直接打开）
+  tig [关键字]             新终端窗口用 tig 打开（单仓下直接打开）
   rm <关键字>              从清单里删除记录
   prune                    清理磁盘上已不存在且未忽略的记录
 
@@ -80,7 +87,7 @@ const usageText = `grscan - 本地 git 仓库扫描与整理工具
   config rm-root <dir>     移除扫描根
   config add-exclude <n>   添加跳过的目录名（支持 * 通配）
   config rm-exclude <n>    移除跳过的目录名
-  config set k=v           直接改配置（jobs / max-depth / fast / deep / git-exe）
+  config set k=v           直接改配置（jobs / max-depth / fast / deep / git-exe / tig-exe / term-cmd）
 
 导出:
   export --format=md|outline|csv|json [-o 文件]
@@ -89,8 +96,22 @@ const usageText = `grscan - 本地 git 仓库扫描与整理工具
       csv      带 BOM，Excel 直接打开
       json     原始结构化数据，喂给别的脚本或模型
 
+tig 联动:
+  igit tig <关键字>              按仓库状态选开屏位置，省掉"我为什么打开它来着"
+      有未提交改动 → status 视图      领先远端 → 只看没推上去的那几个提交
+      没配上游    → refs 视图         其它     → 主视图（提交历史）
+  igit tig <关键字> --view=status  强制停在某一屏（auto/main/status/log/refs）
+  igit tig <关键字> --print        只打印要跑的命令行，不弹窗口
+  triage 面板里按 g                直接打开光标所在的那个仓库
+
+  对象只看当前作用域。站在集合里就给关键字，站在具体仓库上就不用给 ——
+  这时再给关键字会报错：这一层只负责定视图。命中 0 个或多个会列出编号候选，不替你选。
+  log / main / status / refs 是视图保留字；仓库真叫这些名字时用 --repo=log。
+  igit config set tig-exe=<路径>   tig 不在 PATH 时指定它
+  igit config set term-cmd=...     指定用什么终端拉起，占位符 {dir} {cmd}
+
 通用选项:
-  --home <dir>  指定数据目录（也可用环境变量 GRSCAN_HOME），默认 ~/.grscan
+  --home <dir>  指定数据目录（也可用环境变量 IGIT_HOME 或 GRSCAN_HOME），默认 ~/.igit
   --in=<作用域>  临时指定作用范围，写在命令前后都行，例: --in=file:D:\work
 
 list / tree 共用选项:
@@ -110,9 +131,9 @@ list / tree 共用选项:
   --width=N    表格宽度（默认 120）
 
 目录级规则示例:
-  grscan hide D:\repos\ryxl_rd        这块彻底不看，扫描也不进
-  grscan fold D:\repos\ryxl_rd        只保留一行"多少仓库"，不展开细节
-  grscan dirs                         看看现在都设了哪些规则
+  igit hide D:\repos\ryxl_rd        这块彻底不看，扫描也不进
+  igit fold D:\repos\ryxl_rd        只保留一行"多少仓库"，不展开细节
+  igit dirs                         看看现在都设了哪些规则
 
 list 额外选项:
   --short      压缩路径显示（默认显示完整路径）
@@ -159,7 +180,7 @@ func run(raw []string) int {
 		fmt.Print(usageText)
 		return 0
 	case "-v", "--version", "version":
-		fmt.Printf("grscan %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
+		fmt.Printf("igit %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
 		return 0
 	}
 
@@ -247,12 +268,22 @@ func dispatch(ctx *appCtx, cmd string, a args) int {
 		return cmdTriage(ctx, a)
 	case "set":
 		return cmdSet(ctx, a)
+	case "group":
+		return cmdGroup(ctx, a)
+	case "tag":
+		return cmdTag(ctx, a)
+	case "status":
+		return cmdStatus(ctx, a)
+	case "note":
+		return cmdNote(ctx, a)
 	case "dupes":
 		return cmdDupes(ctx, a)
 	case "stats":
 		return cmdStats(ctx, a)
 	case "open":
 		return cmdOpen(ctx, a)
+	case "tig":
+		return cmdTig(ctx, a)
 	case "rm":
 		return cmdRm(ctx, a)
 	case "prune":
@@ -280,11 +311,11 @@ func dispatch(ctx *appCtx, cmd string, a args) int {
 
 // ---------------------------------------------------------------- 会话
 
-// runREPL 从 terminal 进到 grscan 自己的世界：提示符带当前作用域，
+// runREPL 从 terminal 进到 igit 自己的世界：提示符带当前作用域，
 // 敲一行执行一条，exit 出来。作用域在会话内流转，进程结束就没了。
 func runREPL(ctx *appCtx) int {
 	ctx.repl = true
-	fmt.Printf("grscan %s · %s\n", version, scopeLine(ctx.res))
+	fmt.Printf("igit %s · %s\n", version, scopeLine(ctx.res))
 	fmt.Println("  敲 help 看这个界面能做什么，exit 退出")
 	fmt.Println()
 
@@ -385,10 +416,48 @@ func candidates(ctx *appCtx, head, word string) []string {
 			return filePaths(word[:i+1], word[i+1:])
 		}
 		return matchPrefix(cdTargets(ctx), word)
-	case "open", "rm", "show", "log", "set":
+	case "open", "rm", "show", "log", "set", "tig":
 		return matchPrefix(repoNames(ctx), word)
+	case "group":
+		if len(fields) == 1 && endsSpace || (len(fields) == 2 && !endsSpace) {
+			subc := []string{"list", "new", "set", "clear"}
+			return matchPrefix(append(subc, allGroupNames(ctx)...), word)
+		}
+		if len(fields) >= 2 {
+			return matchPrefix(allGroupNames(ctx), word)
+		}
+	case "tag":
+		if len(fields) == 1 && endsSpace || (len(fields) == 2 && !endsSpace) {
+			subc := []string{"list", "add", "rm"}
+			return matchPrefix(subc, word)
+		}
+		if len(fields) >= 2 {
+			return matchPrefix(allTagNames(ctx), word)
+		}
+	case "status":
+		return matchPrefix([]string{"new", "active", "done", "archived", "待处理", "跟进中", "已处理", "已归档"}, word)
 	}
 	return nil
+}
+
+func allGroupNames(ctx *appCtx) []string {
+	m := map[string]bool{}
+	for _, r := range ctx.state.Repos {
+		if r.Group != "" {
+			m[r.Group] = true
+		}
+	}
+	return util.SortedKeys(m)
+}
+
+func allTagNames(ctx *appCtx) []string {
+	m := map[string]bool{}
+	for _, r := range ctx.state.Repos {
+		for _, t := range r.Tags {
+			m[t] = true
+		}
+	}
+	return util.SortedKeys(m)
 }
 
 // filePaths 列出磁盘上真实存在的子目录，拼成 file: 段。
@@ -448,20 +517,20 @@ func driveTargets(prefix string) []string {
 // commandsFor 这个界面上能敲的命令。功能集由界面定义，所以 Tab 补出来的
 // 就是此刻真正可用的那几个 —— 顺带把"这个界面能做什么"摆明了。
 func commandsFor(ctx *appCtx) []string {
-	common := []string{"cd", "pwd", "help", "exit", "quit"}
+	common := []string{"cd", "pwd", "help", "exit", "quit", "group", "tag", "config"}
 	res := ctx.res
 	if res == nil {
-		return append(common, "ls", "list", "scan", "config")
+		return append(common, "ls", "list", "scan")
 	}
 	switch res.Kind {
 	case scope.KindRepo:
-		return append(common, "ls", "list", "open", "set")
+		return append(common, "ls", "list", "open", "tig", "stats", "status", "note", "scan", "dupes", "set")
 	case scope.KindRoot:
 		return append(common,
-			"ls", "list", "scan", "stats", "tree", "triage", "tui", "export", "dupes", "dirs", "config")
+			"ls", "list", "scan", "stats", "tree", "triage", "tui", "export", "dupes", "dirs", "tig")
 	default:
 		acts := []string{
-			"ls", "list", "tree", "triage", "tui", "stats", "export", "set", "open", "hide", "fold", "dirs",
+			"ls", "list", "tree", "triage", "tui", "stats", "export", "set", "status", "note", "tig", "open", "hide", "fold", "dirs", "scan", "dupes",
 		}
 		return append(common, acts...)
 	}
@@ -482,7 +551,7 @@ func cdTargets(ctx *appCtx) []string {
 		for _, it := range res.Children {
 			out = append(out, it.Target) // file:D:\work / group:工作 / tag:xxx
 		}
-	case scope.KindCollection:
+	default:
 		for _, it := range res.Children {
 			out = append(out, it.Label)
 		}
@@ -490,7 +559,7 @@ func cdTargets(ctx *appCtx) []string {
 			out = append(out, "repo:"+res.Self.Path) // 这个目录自己也是个仓库
 		}
 	}
-	out = append(out, "..", "/")
+	out = append(out, "..", "/", "-")
 	return out
 }
 
@@ -529,7 +598,7 @@ func matchPrefix(in []string, word string) []string {
 // replPipe 从管道读指令执行。没有补全和历史，但脚本能喂一整串进来。
 func replPipe(ctx *appCtx, in *bufio.Reader) int {
 	ctx.repl = true
-	fmt.Printf("grscan %s · %s\n", version, scopeLine(ctx.res))
+	fmt.Printf("igit %s · %s\n", version, scopeLine(ctx.res))
 	sc := bufio.NewScanner(in)
 	for {
 		fmt.Print(prompt(ctx))
@@ -585,13 +654,13 @@ func execLine(ctx *appCtx, line string) {
 // prompt 提示符带上作用域和仓库数，让人随时知道自己在哪。
 func prompt(ctx *appCtx) string {
 	if ctx.res == nil {
-		return "grscan > "
+		return "igit > "
 	}
-	label := "/"
-	if s := ctx.res.Scope.String(); s != "" {
-		label = s
+	trail := ctx.res.Scope.TrailString()
+	if ctx.res.TargetRepo() != nil && (ctx.res.NodeType == scope.NodeRepo || ctx.res.Kind == scope.KindRepo) {
+		return fmt.Sprintf("igit [%s] > ", trail)
 	}
-	return fmt.Sprintf("grscan %s %d > ", label, ctx.res.Totals.Repos)
+	return fmt.Sprintf("igit [%s · %d 个仓库] > ", trail, ctx.res.Totals.Repos)
 }
 
 func scopeLine(res *scope.Resolved) string {
@@ -811,8 +880,8 @@ func resolveFromCWD(ctx *appCtx) bool {
 		})
 	}
 	fmt.Printf("当前目录不在扫描范围内: %s\n", cwd)
-	fmt.Println("  先跑  grscan scan  扫一遍，或  grscan config add-root <目录>  把这里加进扫描根")
-	fmt.Println("  也可以  grscan cd /  直接看全集")
+	fmt.Println("  先跑  igit scan  扫一遍，或  igit config add-root <目录>  把这里加进扫描根")
+	fmt.Println("  也可以  igit cd /  直接看全集")
 	return false
 }
 
@@ -842,7 +911,7 @@ func setResolved(ctx *appCtx, sc scope.Scope) bool {
 }
 
 func scopeLabel(res *scope.Resolved) string {
-	if s := res.Scope.String(); s != "" {
+	if s := res.Scope.TrailString(); s != "" && s != "/" {
 		return s
 	}
 	return "全集"
@@ -869,8 +938,53 @@ func inPool(pool []*state.Repo, r *state.Repo) bool {
 	return false
 }
 
+// pickTarget 在当前作用域内定出命令的宾语。
+//
+// 所有"作用于某一个仓库"的命令都走它，别再各自 ctx.state.Find 一遍：
+// 各自找一遍的结果就是有的认作用域、有的不认 —— 提示符上写着站在哪，命令却跑去别的盘上开窗口。
+// 定不出来时原因和候选已经打出来了，调用方原样返回退出码即可。
+func pickTarget(ctx *appCtx, cmd, kw string) *state.Repo {
+	pool := scopeRepos(ctx)
+	label := "全集"
+	switch {
+	case pool != nil:
+		label = scopeLabel(ctx.res)
+	case ctx.res == nil:
+		label = "全集（当前目录不在扫描范围内）"
+	}
+	var in io.Reader
+	if ctx.repl {
+		in = os.Stdin // REPL 里能等人选；管道模式下不能，只列候选
+	}
+	return pick.Repo(pick.Opt{
+		Cmd: cmd, Label: label, Pool: pool, All: ctx.state.Repos, In: in, Out: os.Stdout,
+	}, kw)
+}
+
+// poolHits 把全清单的命中收窄到作用域内。
+//
+// 批量命令（set / rm）一次本来就能吃多个宾语，所以不走 pickTarget 的单数语义，
+// 但作用域的约束一样成立 —— 池外的命中一律丢掉，并且要说清楚丢了几个。
+func poolHits(ctx *appCtx, kw string) []*state.Repo {
+	pool := scopeRepos(ctx)
+	hits := ctx.state.Find(kw)
+	if pool == nil {
+		return hits
+	}
+	var in []*state.Repo
+	for _, h := range hits {
+		if inPool(pool, h) {
+			in = append(in, h)
+		}
+	}
+	if len(in) == 0 && len(hits) > 0 {
+		fmt.Fprintf(os.Stderr, "  %s 只匹配到作用域外的 %d 个，已跳过（要改先 cd 过去）\n", kw, len(hits))
+	}
+	return in
+}
+
 func scopeLabelOf(sc scope.Scope) string {
-	if s := sc.String(); s != "" {
+	if s := sc.TrailString(); s != "" && s != "/" {
 		return s
 	}
 	return "全集"
@@ -880,7 +994,7 @@ func scopeLabelOf(sc scope.Scope) string {
 func printScopeHead(res *scope.Resolved) {
 	fmt.Printf("作用域  %s · %d 个仓库\n", scopeLabel(res), res.Totals.Repos)
 	if res.Freshness != "" {
-		fmt.Printf("  数据来自 %s的扫描（grscan scan 刷新）\n", res.Freshness)
+		fmt.Printf("  数据来自 %s的扫描（igit scan 刷新）\n", res.Freshness)
 	}
 	printSelf(res)
 }
@@ -957,23 +1071,49 @@ func cmdScope(ctx *appCtx, a args) int {
 func availableActions(res *scope.Resolved) []action {
 	switch res.Kind {
 	case scope.KindRepo:
-		return []action{
-			{"cd ..", "回上一层"},
+		acts := []action{
+			{"tig", "拉起 tig 查看提交历史与改动"},
+			{"open", "在资源管理器中打开此目录"},
+			{"stats", "查看此仓库详细统计画像"},
+			{"list", "查看此仓库表格信息"},
+			{"group [set]", "查看或调整所属分组"},
+			{"tag [add|rm]", "查看或添加/移除标签"},
+			{"status <状态>", "更新状态 (new|active|done|archived)"},
+			{"note <备注>", "记录备注"},
+			{"scan", "原位重新检测当前仓库状态"},
+			{"dupes", "查询全盘中是否有此仓库副本"},
+			{"cd ..", "原路返回上一层"},
 			{"cd /", "回到全集"},
-			{"pwd", "我在哪"},
+			{"pwd", "查看当前来时路"},
 		}
+		if len(res.Children) > 0 {
+			acts = append(acts, action{"cd <子仓库>", "进入嵌套子仓库"})
+		}
+		return acts
 	case scope.KindRoot:
 		return []action{
 			{"ls", "看维度入口：按目录 / 按分组 / 按标签"},
 			{"list", "列出仓库（默认只看待处理）"},
-			{"cd tag:xxx", "走进某个标签或分组"},
+			{"tree", "看全局目录分布树"},
+			{"stats", "查看全局聚合统计"},
+			{"cd <目标>", "走进某个目录、标签或分组"},
+			{"group list/new", "查看或新建全局分组"},
+			{"tag list", "查看全局标签"},
+			{"scan", "全盘扫描"},
+			{"dupes", "全盘重复克隆比对"},
 		}
 	default:
 		acts := []action{
-			{"ls", "看这批的详细清单"},
+			{"ls", "看这批的详细清单与子项"},
 			{"list", "按表格看这批"},
-			{"cd ..", "上一层"},
+			{"tree", "看这批的空间分布树"},
+			{"stats", "看这批的汇总统计"},
+			{"cd <子项>", "进入子目录或仓库"},
+			{"cd ..", "原路返回上一层"},
 			{"cd /", "回到全集"},
+			{"group list/new", "查看或新建全局分组"},
+			{"tag list", "查看全局标签"},
+			{"scan", "窄化刷新当前目录/范围"},
 		}
 		if res.Self != nil {
 			acts = append(acts, action{"cd repo:<路径>", "看这个目录自身（它也是个仓库）"})
@@ -989,7 +1129,19 @@ func cmdLs(ctx *appCtx, a args) int {
 	fmt.Println()
 	switch res.Kind {
 	case scope.KindRepo:
-		fmt.Println("  这是单个仓库，回上一层用 cd ..")
+		if len(res.Children) > 0 {
+			fmt.Println("  嵌套子仓库:")
+			for _, it := range res.Children {
+				fmt.Printf("    %s%s\n", util.PadRightDisplay(it.Label, 26), it.Summary)
+			}
+			return 0
+		}
+		if target := res.TargetRepo(); target != nil {
+			fmt.Printf("  这是单个仓库: %s (%s)\n", target.Name, repoGist(target))
+			fmt.Println("  可用操作: tig, open, stats, list, group, tag, status, note; 回上一层用 cd ..")
+		} else {
+			fmt.Println("  这是单个仓库，回上一层用 cd ..")
+		}
 		return 0
 	case scope.KindRoot:
 		for _, f := range []struct{ dim, title string }{
@@ -1040,8 +1192,8 @@ func cmdLs(ctx *appCtx, a args) int {
 }
 
 func cmdPwd(ctx *appCtx, a args) int {
-	if s := ctx.res.Scope.String(); s != "" {
-		fmt.Println(s)
+	if ctx.res != nil {
+		fmt.Printf("来时路: %s\n", ctx.res.Scope.TrailString())
 		return 0
 	}
 	fmt.Println("/")
@@ -1056,7 +1208,7 @@ func cmdCd(ctx *appCtx, a args) int {
 
 	// 一次性用法里进程结束焦点就没了，说清楚比默默执行强
 	if !ctx.repl && target != "" {
-		fmt.Println("（cd 只在会话里有效。一次性用法：先 cd 到那个目录，或用 grscan --in=<作用域> <命令>）")
+		fmt.Println("（cd 只在会话里有效。一次性用法：先 cd 到那个目录，或用 igit --in=<作用域> <命令>）")
 		return 1
 	}
 
@@ -1127,7 +1279,7 @@ func hasScope(ctx *appCtx) bool {
 	if ctx.res != nil {
 		return true
 	}
-	fmt.Println("（当前目录不在扫描范围内，还没定出作用域。grscan cd / 看全集，或 cd tag:xxx 直接定位）")
+	fmt.Println("（当前目录不在扫描范围内，还没定出作用域。igit cd / 看全集，或 cd tag:xxx 直接定位）")
 	return false
 }
 
@@ -1159,12 +1311,23 @@ func guessFromRoot(ctx *appCtx, name string) (scope.Scope, bool) {
 func cmdScan(ctx *appCtx, a args) int {
 	roots := a.multi["root"]
 	if len(roots) == 0 {
-		roots = ctx.cfg.Roots
+		if !a.has("all") && ctx.res != nil && !ctx.res.Scope.IsRoot() {
+			if target := ctx.res.TargetRepo(); target != nil {
+				roots = []string{target.Path}
+				fmt.Printf("原位刷新当前仓库: %s\n", target.Path)
+			} else if baseDir := ctx.res.Scope.BaseDir(); baseDir != "" {
+				roots = []string{baseDir}
+				fmt.Printf("原位窄化扫描目录: %s\n", baseDir)
+			}
+		}
+		if len(roots) == 0 {
+			roots = ctx.cfg.Roots
+		}
 	}
 	roots = normalizeRoots(roots)
 	if len(roots) == 0 {
 		fmt.Println("还没有配置扫描根目录。")
-		fmt.Println("  先跑  grscan config discover  探查一下，再  grscan config add-root <目录>")
+		fmt.Println("  先跑  igit config discover  探查一下，再  igit config add-root <目录>")
 		return 1
 	}
 
@@ -1258,13 +1421,13 @@ func cmdScan(ctx *appCtx, a args) int {
 		fmt.Printf("  已忽略跳过 %d\n", res.SkippedIgnore)
 	}
 	if missing > 0 {
-		fmt.Printf("  磁盘已无   %d（运行 grscan prune 清理）\n", missing)
+		fmt.Printf("  磁盘已无   %d（运行 igit prune 清理）\n", missing)
 	}
 	fmt.Printf("  清单总数   %d，其中待处理 %d\n", len(ctx.state.Repos), pending)
 	fmt.Println()
 	fmt.Printf("状态文件: %s\n", ctx.state.Path())
 	if pending > 0 {
-		fmt.Println("下一步: grscan triage   逐个判别；或 grscan list 看清单")
+		fmt.Println("下一步: igit triage   逐个判别；或 igit list 看清单")
 	} else {
 		fmt.Println("待处理已清空。")
 	}
@@ -1366,10 +1529,6 @@ func isTerminal(f *os.File) bool {
 // ---------------------------------------------------------------- list
 
 func cmdList(ctx *appCtx, a args) int {
-	if ctx.res.Kind == scope.KindRepo {
-		fmt.Println("当前在仓库节点，list 不适用。看详情用 show，回上一层用 cd ..")
-		return 1
-	}
 	ctx.state.SortBy(state.ParseSortField(a.str("path", "sort", "s")), a.has("desc", "r"))
 	selected := filterRepos(ctx.state, a, ctx.res.Repos)
 	matched := len(selected)
@@ -1663,13 +1822,13 @@ func normalizeStatus(s string) string {
 
 func cmdSet(ctx *appCtx, a args) int {
 	if len(a.pos) == 0 {
-		fmt.Println("用法: grscan set <关键字> [--group=X] [--status=X] [--tag=a,b] [--untag=a,b] [--note=X] [--ignore|--unignore] [--yes]")
+		fmt.Println("用法: igit set <关键字> [--group=X] [--status=X] [--tag=a,b] [--untag=a,b] [--note=X] [--ignore|--unignore] [--yes]")
 		fmt.Println("关键字可以是完整路径、路径片段或仓库名。")
 		return 2
 	}
 	targets := map[string]*state.Repo{}
 	for _, q := range a.pos {
-		hits := ctx.state.Find(q)
+		hits := poolHits(ctx, q)
 		if len(hits) == 0 {
 			fmt.Fprintf(os.Stderr, "没有匹配到仓库: %s\n", q)
 			continue
@@ -1764,6 +1923,320 @@ func cmdSet(ctx *appCtx, a args) int {
 	return 0
 }
 
+func cmdGroup(ctx *appCtx, a args) int {
+	sub := ""
+	if len(a.pos) > 0 {
+		sub = a.pos[0]
+	}
+	switch sub {
+	case "", "list", "ls":
+		groups := map[string]int{}
+		for _, r := range ctx.state.Repos {
+			if r.Group != "" {
+				groups[r.Group]++
+			}
+		}
+		if len(groups) == 0 {
+			fmt.Println("当前尚未创建任何分组。可用 'group new <名称>' 或 'set --group=<名称>' 创建。")
+			return 0
+		}
+		fmt.Println("现有分组:")
+		keys := util.SortedKeys(groups)
+		for _, k := range keys {
+			fmt.Printf("  %-20s %d 个仓库\n", k, groups[k])
+		}
+		return 0
+	case "new", "add", "create":
+		if len(a.pos) < 2 {
+			fmt.Println("用法: group new <分组名称>")
+			return 2
+		}
+		name := strings.TrimSpace(a.pos[1])
+		if name == "" {
+			fmt.Println("分组名称不能为空")
+			return 2
+		}
+		fmt.Printf("分组已就绪: %s（给仓库分配请用 'group set %s'）\n", name, name)
+		return 0
+	case "set":
+		var kw, grpName string
+		target := ctx.res.TargetRepo()
+		if len(a.pos) == 2 {
+			if target != nil {
+				grpName = a.pos[1]
+			} else {
+				fmt.Println("用法: group set <仓库关键字> <分组名称>")
+				return 2
+			}
+		} else if len(a.pos) >= 3 {
+			kw = a.pos[1]
+			grpName = a.pos[2]
+		} else {
+			fmt.Println("用法: group set [仓库] <分组名称>")
+			return 2
+		}
+		var r *state.Repo
+		if kw != "" {
+			r = pickTarget(ctx, "group set", kw)
+			if r == nil {
+				return 2
+			}
+		} else {
+			r = target
+		}
+		r.Group = strings.TrimSpace(grpName)
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		if err := ctx.state.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+			return 1
+		}
+		fmt.Printf("已将 %s 分组设置为: %s\n", r.Name, r.Group)
+		return 0
+	case "clear", "rm", "unset":
+		var kw string
+		target := ctx.res.TargetRepo()
+		if len(a.pos) >= 2 {
+			kw = a.pos[1]
+		}
+		var r *state.Repo
+		if kw != "" {
+			r = pickTarget(ctx, "group clear", kw)
+			if r == nil {
+				return 2
+			}
+		} else if target != nil {
+			r = target
+		} else {
+			fmt.Println("用法: group clear [仓库关键字]")
+			return 2
+		}
+		r.Group = ""
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		if err := ctx.state.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+			return 1
+		}
+		fmt.Printf("已清除 %s 的分组\n", r.Name)
+		return 0
+	default:
+		// 如果当前站在具体仓库上，允许直接输入 'group <组名>' 作为 set 的简写
+		if target := ctx.res.TargetRepo(); target != nil && len(a.pos) == 1 {
+			grpName := strings.TrimSpace(a.pos[0])
+			target.Group = grpName
+			target.ReviewedAt = time.Now().Format(time.RFC3339)
+			state.Canonicalize(target)
+			if err := ctx.state.Save(); err != nil {
+				fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+				return 1
+			}
+			fmt.Printf("已将 %s 分组设置为: %s\n", target.Name, target.Group)
+			return 0
+		}
+		fmt.Printf("未知 group 子命令: %s (可选: list / new / set / clear)\n", sub)
+		return 2
+	}
+}
+
+func cmdTag(ctx *appCtx, a args) int {
+	sub := ""
+	if len(a.pos) > 0 {
+		sub = a.pos[0]
+	}
+	switch sub {
+	case "", "list", "ls":
+		tags := map[string]int{}
+		for _, r := range ctx.state.Repos {
+			for _, t := range r.Tags {
+				tags[t]++
+			}
+		}
+		if len(tags) == 0 {
+			fmt.Println("当前尚未创建任何标签。可用 'tag add <标签名>' 给仓库打标签。")
+			return 0
+		}
+		fmt.Println("现有标签:")
+		keys := util.SortedKeys(tags)
+		for _, k := range keys {
+			fmt.Printf("  %-20s %d 个仓库\n", k, tags[k])
+		}
+		return 0
+	case "add", "set":
+		var kw, tagStr string
+		target := ctx.res.TargetRepo()
+		if len(a.pos) == 2 {
+			if target != nil {
+				tagStr = a.pos[1]
+			} else {
+				fmt.Println("用法: tag add <仓库关键字> <标签...>")
+				return 2
+			}
+		} else if len(a.pos) >= 3 {
+			kw = a.pos[1]
+			tagStr = a.pos[2]
+		} else {
+			fmt.Println("用法: tag add [仓库] <标签,标签...>")
+			return 2
+		}
+		var r *state.Repo
+		if kw != "" {
+			r = pickTarget(ctx, "tag add", kw)
+			if r == nil {
+				return 2
+			}
+		} else {
+			r = target
+		}
+		newTags := splitList(tagStr)
+		for _, t := range newTags {
+			if !hasTag(r, t) {
+				r.Tags = append(r.Tags, t)
+			}
+		}
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		if err := ctx.state.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+			return 1
+		}
+		fmt.Printf("已更新 %s 标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
+		return 0
+	case "rm", "del", "remove":
+		var kw, tagStr string
+		target := ctx.res.TargetRepo()
+		if len(a.pos) == 2 {
+			if target != nil {
+				tagStr = a.pos[1]
+			} else {
+				fmt.Println("用法: tag rm <仓库关键字> <标签...>")
+				return 2
+			}
+		} else if len(a.pos) >= 3 {
+			kw = a.pos[1]
+			tagStr = a.pos[2]
+		} else {
+			fmt.Println("用法: tag rm [仓库] <标签,标签...>")
+			return 2
+		}
+		var r *state.Repo
+		if kw != "" {
+			r = pickTarget(ctx, "tag rm", kw)
+			if r == nil {
+				return 2
+			}
+		} else {
+			r = target
+		}
+		delTags := splitList(tagStr)
+		for _, t := range delTags {
+			r.Tags = removeTag(r, t)
+		}
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		if err := ctx.state.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+			return 1
+		}
+		fmt.Printf("已更新 %s 标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
+		return 0
+	default:
+		fmt.Printf("未知 tag 子命令: %s (可选: list / add / rm)\n", sub)
+		return 2
+	}
+}
+
+func cmdStatus(ctx *appCtx, a args) int {
+	target := ctx.res.TargetRepo()
+	if len(a.pos) == 0 {
+		if target != nil {
+			st := target.Status
+			if st == "" {
+				st = "new"
+			}
+			fmt.Printf("%s 当前状态: %s\n", target.Name, st)
+			return 0
+		}
+		fmt.Println("用法: status [仓库] <new|active|done|archived>")
+		return 2
+	}
+	var kw, stVal string
+	if len(a.pos) == 1 {
+		if target != nil {
+			stVal = a.pos[0]
+		} else {
+			fmt.Println("用法: status <仓库关键字> <状态值>")
+			return 2
+		}
+	} else {
+		kw = a.pos[0]
+		stVal = a.pos[1]
+	}
+	norm := normalizeStatus(stVal)
+	if norm == "" {
+		fmt.Fprintf(os.Stderr, "无法识别的状态 %q，可选: new/active/done/archived\n", stVal)
+		return 2
+	}
+	var r *state.Repo
+	if kw != "" {
+		r = pickTarget(ctx, "status", kw)
+		if r == nil {
+			return 2
+		}
+	} else {
+		r = target
+	}
+	r.Status = norm
+	r.ReviewedAt = time.Now().Format(time.RFC3339)
+	state.Canonicalize(r)
+	if err := ctx.state.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+		return 1
+	}
+	fmt.Printf("已将 %s 状态设置为: %s\n", r.Name, r.Status)
+	return 0
+}
+
+func cmdNote(ctx *appCtx, a args) int {
+	target := ctx.res.TargetRepo()
+	if len(a.pos) == 0 {
+		if target != nil {
+			if target.Note == "" {
+				fmt.Printf("%s 暂无备注\n", target.Name)
+			} else {
+				fmt.Printf("%s 备注: %s\n", target.Name, target.Note)
+			}
+			return 0
+		}
+		fmt.Println("用法: note [仓库] <备注内容>")
+		return 2
+	}
+	var r *state.Repo
+	var noteText string
+	if target != nil && len(a.pos) >= 1 {
+		r = target
+		noteText = strings.Join(a.pos, " ")
+	} else if len(a.pos) >= 2 {
+		r = pickTarget(ctx, "note", a.pos[0])
+		if r == nil {
+			return 2
+		}
+		noteText = strings.Join(a.pos[1:], " ")
+	} else {
+		fmt.Println("用法: note <仓库关键字> <备注内容>")
+		return 2
+	}
+	r.Note = noteText
+	r.ReviewedAt = time.Now().Format(time.RFC3339)
+	state.Canonicalize(r)
+	if err := ctx.state.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+		return 1
+	}
+	fmt.Printf("已为 %s 保存备注: %s\n", r.Name, r.Note)
+	return 0
+}
+
 func splitList(s string) []string {
 	out := []string{}
 	for _, p := range strings.Split(s, ",") {
@@ -1796,6 +2269,29 @@ func confirm() bool {
 // ---------------------------------------------------------------- 其它命令
 
 func cmdDupes(ctx *appCtx, a args) int {
+	if target := ctx.res.TargetRepo(); target != nil && (ctx.res.NodeType == scope.NodeRepo || len(scopeRepos(ctx)) == 1) {
+		key := target.PrimaryURL
+		if key == "" {
+			fmt.Printf("当前仓库 %s 尚未配置远端地址，无法按远端查重。\n", target.Name)
+			return 0
+		}
+		var matches []*state.Repo
+		for _, r := range ctx.state.Repos {
+			if r.PrimaryURL == key && r.ID != target.ID {
+				matches = append(matches, r)
+			}
+		}
+		if len(matches) == 0 {
+			fmt.Printf("全盘未发现与当前仓库远端 (%s) 相同的重复克隆。\n", key)
+			return 0
+		}
+		fmt.Printf("发现当前仓库在全盘存在 %d 个相同远端的副本 (%s):\n", len(matches), key)
+		for _, r := range matches {
+			fmt.Printf("  %-10s %s\n", render.CommitAge(r), r.Path)
+		}
+		return 0
+	}
+
 	buckets := map[string][]*state.Repo{}
 	for _, r := range ctx.state.Repos {
 		if r.Ignored && !a.has("all") {
@@ -1847,6 +2343,10 @@ func cmdStats(ctx *appCtx, a args) int {
 	if ctx.res != nil {
 		printScopeHead(ctx.res)
 		fmt.Println()
+	}
+	if target := ctx.res.TargetRepo(); target != nil && (ctx.res.NodeType == scope.NodeRepo || len(pool) == 1) {
+		printSingleRepoStats(target)
+		return 0
 	}
 	byStatus := map[string]int{}
 	byGroup := map[string]int{}
@@ -1914,20 +2414,72 @@ func cmdStats(ctx *appCtx, a args) int {
 	return 0
 }
 
+func printSingleRepoStats(r *state.Repo) {
+	fmt.Printf("仓库画像: %s\n", r.Name)
+	fmt.Printf("  绝对路径:    %s\n", r.Path)
+	branch := r.Branch
+	if r.Detached {
+		branch = "(detached)"
+	}
+	fmt.Printf("  当前分支:    %s\n", branch)
+	if r.Ahead > 0 || r.Behind > 0 {
+		fmt.Printf("  远端同步:    领先 %d, 落后 %d\n", r.Ahead, r.Behind)
+	} else if r.HasUpstream {
+		fmt.Printf("  远端同步:    与上游同步\n")
+	} else {
+		fmt.Printf("  远端同步:    未配置上游\n")
+	}
+	if r.Dirty {
+		fmt.Printf("  工作区:      脏 (暂存:%d, 未暂存:%d, 未跟踪:%d)\n", r.Staged, r.Unstaged, r.Untracked)
+	} else {
+		fmt.Printf("  工作区:      干净\n")
+	}
+	if r.PrimaryURL != "" {
+		fmt.Printf("  远端地址:    %s\n", r.PrimaryURL)
+	}
+	if r.Commit != "" {
+		cShort := r.Commit
+		if len(cShort) > 7 {
+			cShort = cShort[:7]
+		}
+		fmt.Printf("  最近提交:    %s · %s (%s)\n", cShort, r.Subject, r.CommitAt)
+	}
+	if r.SizeBytes > 0 {
+		fmt.Printf("  磁盘体积:    %s\n", util.HumanSize(r.SizeBytes))
+	}
+	grp := r.Group
+	if grp == "" {
+		grp = "(未分组)"
+	}
+	fmt.Printf("  所属分组:    %s\n", grp)
+	if len(r.Tags) > 0 {
+		fmt.Printf("  标签:        %s\n", strings.Join(r.Tags, ", "))
+	}
+	st := r.Status
+	if st == "" {
+		st = "new (待处理)"
+	}
+	fmt.Printf("  处理状态:    %s\n", st)
+	if r.Note != "" {
+		fmt.Printf("  备注:        %s\n", r.Note)
+	}
+}
+
 func cmdOpen(ctx *appCtx, a args) int {
-	if len(a.pos) == 0 {
-		fmt.Println("用法: grscan open <关键字>")
+	kw := ""
+	if len(a.pos) > 0 {
+		kw = a.pos[0]
+	}
+	var r *state.Repo
+	if kw == "" && ctx.res != nil && ctx.res.TargetRepo() != nil {
+		r = ctx.res.TargetRepo()
+	} else {
+		r = pickTarget(ctx, "open", kw)
+	}
+	if r == nil {
 		return 2
 	}
-	hits := ctx.state.Find(a.pos[0])
-	if len(hits) == 0 {
-		fmt.Println("没有匹配到仓库。")
-		return 1
-	}
-	if len(hits) > 1 {
-		fmt.Printf("匹配到 %d 个，打开第一个: %s\n", len(hits), hits[0].Path)
-	}
-	return openInExplorer(hits[0].Path)
+	return openInExplorer(r.Path)
 }
 
 func openInExplorer(path string) int {
@@ -1949,12 +2501,120 @@ func openInExplorer(path string) int {
 	return 0
 }
 
-func cmdRm(ctx *appCtx, a args) int {
-	if len(a.pos) == 0 {
-		fmt.Println("用法: grscan rm <关键字>   （只从清单移除，不动磁盘）")
+// cmdTig 把清单里的一个仓库交给 tig，开在新终端窗口里。
+//
+// 关键字定位跟 open / rm 一致（名字、路径片段都行）。不给关键字时，
+// 如果你正站在单个仓库节点上，就默认是它 —— cd 进来之后直接敲 igit tig。
+func cmdTig(ctx *appCtx, a args) int {
+	// 位置参数逐个归类：视图保留字归视图，其余归仓库关键字。
+	// 一个位置只许有一个含义，不靠上下文猜 —— 靠猜的话同一个词在不同作用域下含义会变。
+	var view, kw string
+	force := a.str("", "repo", "repo_name")
+	for _, p := range a.pos {
+		if p == "" {
+			continue
+		}
+		if force == "" && tig.IsViewWord(p) {
+			if view != "" {
+				fmt.Fprintf(os.Stderr, "视图给了两次: %s / %s\n", view, p)
+				return 2
+			}
+			view = p
+			continue
+		}
+		if kw != "" {
+			fmt.Fprintf(os.Stderr, "只认一个仓库关键字，多了: %s\n", p)
+			return 2
+		}
+		kw = p
+	}
+	if v, ok := a.kv["view"]; ok {
+		// --view 光秃秃不带值时 parseArgs 记下的是 "true"，那不是视图名，是缺值。
+		if v == "true" {
+			fmt.Fprintln(os.Stderr, "--view 需要一个值，可选: auto / main / status / log / refs")
+			return 2
+		}
+		if view != "" && !strings.EqualFold(view, v) {
+			fmt.Fprintf(os.Stderr, "视图给了两次: %s / %s\n", view, v)
+			return 2
+		}
+		view = v
+	}
+	if force != "" {
+		// --repo 是逃生口：仓库真叫 log / main 这类名字时，强制当关键字。
+		if kw != "" {
+			fmt.Fprintf(os.Stderr, "给了 --repo 就别再给仓库关键字: %s\n", kw)
+			return 2
+		}
+		kw = force
+	}
+
+	// 责任链：站在哪一层，就只干那一层的事。
+	var r *state.Repo
+	switch {
+	case ctx.res != nil && ctx.res.Kind == scope.KindRepo && len(ctx.res.Repos) == 1:
+		// 已经站在具体仓库上，这一层只负责定视图，不再负责挑对象。
+		if kw != "" {
+			fmt.Fprintf(os.Stderr, "这里已经是具体仓库 %s，不接受仓库关键字（要看别的先 cd）\n", ctx.res.Repos[0].Path)
+			return 2
+		}
+		r = ctx.res.Repos[0]
+	default:
+		// 集合 / 根：这一层负责挑对象。
+		r = pickTarget(ctx, "tig", kw)
+		if r == nil {
+			return 2 // 原因和候选 pick 已经打过了，不再重复一遍用法
+		}
+	}
+
+	v, err := tig.Decide(r, view)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 2
 	}
-	hits := ctx.state.Find(a.pos[0])
+
+	// --print 只把命令行打出来，不起窗口。装 tig 之前也能先看看会跑什么。
+	if a.has("print", "dry_run", "dry") {
+		exe := "tig"
+		if e, eerr := tig.Exe(ctx.cfg); eerr == nil {
+			exe = e
+		}
+		fmt.Println(tig.Line(tig.Args(exe, r.Path, v)))
+		return 0
+	}
+
+	line, err := tig.Launch(ctx.cfg, r, v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+	fmt.Printf("已在新窗口打开 %s\n", r.Path)
+	fmt.Printf("  %s\n", line)
+	fmt.Printf("  开屏位置 %s · %s\n", v.String(), v.Why)
+	return 0
+}
+
+// makeOpenTig 面板里按 g 时用的动作。跟命令走同一套 Decide / Launch，
+// 只是回显短一些 —— 面板底部只有一行。
+func makeOpenTig(ctx *appCtx) tui.OpenTig {
+	return func(r *state.Repo) (string, error) {
+		v, err := tig.Decide(r, "auto")
+		if err != nil {
+			return "", err
+		}
+		if _, err := tig.Launch(ctx.cfg, r, v); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s 视图 · %s", v.String(), v.Why), nil
+	}
+}
+
+func cmdRm(ctx *appCtx, a args) int {
+	if len(a.pos) == 0 {
+		fmt.Println("用法: igit rm <关键字>   （只从清单移除，不动磁盘）")
+		return 2
+	}
+	hits := poolHits(ctx, a.pos[0])
 	if len(hits) == 0 {
 		fmt.Println("没有匹配到仓库。")
 		return 1
@@ -1999,18 +2659,72 @@ func cmdPrune(ctx *appCtx, a args) int {
 
 // ---------------------------------------------------------------- 目录级规则
 
-func requireDirArg(a args, verb string) (string, bool) {
+// requireDirArg 解析 hide / fold 的目录参数。
+//
+// 相对路径以**当前作用域**为基准，不是进程 cwd：REPL 里的 cd 只改内存里的作用域，
+// 从不 os.Chdir，拿 cwd 当基准会把规则写到启动目录去（跨平台、跨盘，且完全静默）。
+// 作用域里没有 file 段时无从推断，才退回 cwd，并且必须把基准打出来。
+func requireDirArg(ctx *appCtx, a args, verb string) (string, bool) {
 	if len(a.pos) == 0 {
-		fmt.Printf("用法: grscan %s <目录>\n", verb)
-		fmt.Println("  目录可以是绝对路径，也可以相对当前目录")
+		fmt.Printf("用法: igit %s <目录>\n", verb)
+		fmt.Println("  绝对路径，或相对当前作用域的目录名")
 		return "", false
 	}
-	abs, err := filepath.Abs(strings.Trim(strings.TrimSpace(a.pos[0]), `"`))
+	raw := strings.Trim(strings.TrimSpace(a.pos[0]), `"`)
+	if filepath.IsAbs(raw) {
+		return filepath.Clean(raw), true
+	}
+	if ctx.res != nil {
+		if base := ctx.res.Scope.BaseDir(); base != "" {
+			return filepath.Join(base, raw), true
+		}
+	}
+	cwd, _ := os.Getwd()
+	fmt.Printf("  （当前作用域没有目录基准，按进程目录 %s 解析）\n", cwd)
+	abs, err := filepath.Abs(raw)
 	if err != nil {
-		fmt.Printf("无法解析路径: %s\n", a.pos[0])
+		fmt.Printf("无法解析路径: %s\n", raw)
 		return "", false
 	}
 	return abs, true
+}
+
+// suggestSubdirs 列出 dir 这一层有哪些子目录，路径写错时好有个对照。
+func suggestSubdirs(st *state.State, dir string) []string {
+	parent := util.NormalizePath(filepath.Dir(dir))
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range st.Repos {
+		rp := util.NormalizePath(r.Path)
+		if !strings.HasPrefix(rp, parent+"/") {
+			continue
+		}
+		name := strings.Split(strings.TrimPrefix(rp, parent+"/"), "/")[0]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	if len(out) > 8 {
+		out = out[:8]
+	}
+	return out
+}
+
+// guardEmptyRule 拒绝会盖住 0 个仓库的 hide / fold：
+// 静默写一条永远不生效的规则，比报错危险得多 —— 用户以为生效了，其实什么都没发生。
+func guardEmptyRule(ctx *appCtx, dir, verb string) bool {
+	if affectedCount(ctx.state, dir) > 0 {
+		return true
+	}
+	fmt.Printf("%s 没生效：%s 下面一个仓库都没有。\n", verb, dir)
+	fmt.Println("  多半是路径写错了，规则没有保存。")
+	if names := suggestSubdirs(ctx.state, dir); len(names) > 0 {
+		fmt.Printf("  这一层有: %s\n", strings.Join(names, "  "))
+	}
+	return false
 }
 
 // affectedCount 统计一条规则会盖住多少仓库，执行前让用户心里有数。
@@ -2029,8 +2743,11 @@ func cmdHide(ctx *appCtx, a args, hide bool) int {
 	if !hide {
 		verb = "unhide"
 	}
-	dir, ok := requireDirArg(a, verb)
+	dir, ok := requireDirArg(ctx, a, verb)
 	if !ok {
+		return 2
+	}
+	if hide && !guardEmptyRule(ctx, dir, verb) {
 		return 2
 	}
 	var changed bool
@@ -2062,8 +2779,11 @@ func cmdFold(ctx *appCtx, a args, fold bool) int {
 	if !fold {
 		verb = "unfold"
 	}
-	dir, ok := requireDirArg(a, verb)
+	dir, ok := requireDirArg(ctx, a, verb)
 	if !ok {
+		return 2
+	}
+	if fold && !guardEmptyRule(ctx, dir, verb) {
 		return 2
 	}
 	var changed bool
@@ -2093,8 +2813,8 @@ func cmdDirs(ctx *appCtx, a args) int {
 	st := ctx.state
 	if len(st.Hidden) == 0 && len(st.Folded) == 0 {
 		fmt.Println("还没有设置任何目录规则。")
-		fmt.Println("  grscan hide <目录>   整个目录不出现、也不再扫描")
-		fmt.Println("  grscan fold <目录>   整个目录收拢成一行，只显示数量")
+		fmt.Println("  igit hide <目录>   整个目录不出现、也不再扫描")
+		fmt.Println("  igit fold <目录>   整个目录收拢成一行，只显示数量")
 		return 0
 	}
 	if len(st.Hidden) > 0 {
@@ -2211,7 +2931,7 @@ func cmdTriage(ctx *appCtx, a args) int {
 		label = scopeLabel(ctx.res)
 		fmt.Printf("作用域  %s · %d 个仓库\n", label, ctx.res.Totals.Repos)
 	}
-	if err := tui.Run(ctx.state, ctx.cfg.Roots, initial, preset, subset, label, save); err != nil {
+	if err := tui.Run(ctx.state, ctx.cfg.Roots, initial, preset, subset, label, save, makeOpenTig(ctx)); err != nil {
 		fmt.Fprintf(os.Stderr, "面板启动失败: %v\n", err)
 		return 1
 	}
@@ -2284,6 +3004,16 @@ func configShow(ctx *appCtx) int {
 	} else if gitinfo.ResolveGit("") == "" {
 		fmt.Println("警告: 未在 PATH 中找到 git，只能读取 .git 元数据，拿不到未提交改动")
 	}
+	if ctx.cfg.TigExe != "" {
+		fmt.Printf("tig 可执行文件: %s\n", ctx.cfg.TigExe)
+	} else if p, err := tig.Exe(ctx.cfg); err == nil {
+		fmt.Printf("tig 可执行文件: %s（PATH 中找到）\n", p)
+	} else {
+		fmt.Printf("tig: %v\n", err)
+	}
+	if ctx.cfg.TermCmd != "" {
+		fmt.Printf("终端命令模板: %s\n", ctx.cfg.TermCmd)
+	}
 	return 0
 }
 
@@ -2307,7 +3037,7 @@ func configInit(ctx *appCtx, a args) int {
 
 func configMutateRoot(ctx *appCtx, a args, add bool) int {
 	if len(a.pos) < 2 {
-		fmt.Println("用法: grscan config add-root <目录>")
+		fmt.Println("用法: igit config add-root <目录>")
 		return 2
 	}
 	var changed bool
@@ -2335,7 +3065,7 @@ func configMutateRoot(ctx *appCtx, a args, add bool) int {
 
 func configMutateExclude(ctx *appCtx, a args, add bool) int {
 	if len(a.pos) < 2 {
-		fmt.Println("用法: grscan config add-exclude <目录名>")
+		fmt.Println("用法: igit config add-exclude <目录名>")
 		return 2
 	}
 	name := strings.ToLower(strings.TrimSpace(a.pos[1]))
@@ -2391,6 +3121,10 @@ func configSet(ctx *appCtx, a args) int {
 			ctx.cfg.Deep = v == "true" || v == "1" || v == "yes"
 		case "git_exe", "git":
 			ctx.cfg.GitExe = v
+		case "tig_exe", "tig":
+			ctx.cfg.TigExe = v
+		case "term_cmd", "term":
+			ctx.cfg.TermCmd = v
 		case "root":
 			config.AddRoot(ctx.cfg, v)
 		default:
@@ -2417,7 +3151,7 @@ func configDiscover(ctx *appCtx, a args) int {
 	}
 	driveRoots = normalizeRoots(driveRoots)
 	if len(driveRoots) == 0 {
-		fmt.Println("没有找到可用磁盘。可以 grscan config discover --root=D:\\ 自己指定。")
+		fmt.Println("没有找到可用磁盘。可以 igit config discover --root=D:\\ 自己指定。")
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "粗扫（深度 %d）: %s\n", depth, strings.Join(driveRoots, ", "))
@@ -2487,7 +3221,7 @@ func configDiscover(ctx *appCtx, a args) int {
 		}
 		fmt.Printf("\n已追加 %d 个扫描根。\n", added)
 	} else {
-		fmt.Println("\n觉得合适的目录，用 grscan config add-root <目录> 加进去；")
+		fmt.Println("\n觉得合适的目录，用 igit config add-root <目录> 加进去；")
 		fmt.Println("或者重跑本命令加 --apply --min=2 一次性把含 2 个以上仓库的目录全加上。")
 	}
 	return 0

@@ -10,16 +10,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
-go build -trimpath -ldflags="-s -w" -o grscan.exe .
+go build -trimpath -ldflags="-s -w" -o igit.exe .
 if errorlevel 1 (
     echo.
     echo [x] 编译失败
     pause
     exit /b 1
 )
+copy /y igit.exe grscan.exe >nul 2>nul
 
 echo.
-echo [ok] 已生成 %CD%\grscan.exe
-dir /b grscan.exe
+echo [ok] 已生成 %CD%\igit.exe
+dir /b igit.exe
 echo.
 pause

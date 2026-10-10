@@ -73,10 +73,16 @@ type row struct {
 	sel  bool
 }
 
+// OpenTig 把光标下的仓库交给 tig：返回一句回显，或一条错误。
+// 由调用方注入，面板本身不知道 tig 装在哪、终端怎么起。
+type OpenTig func(r *state.Repo) (string, error)
+
 type model struct {
 	st    *state.State
 	roots []string
 	save  func() error
+	// openTig 为 nil 时按 g 会提示没接上 —— 面板不该假装能用。
+	openTig OpenTig
 
 	// subset 限定这次面板能碰到的仓库（按 Repo.ID 索引）。nil = 全集。
 	// 绝不为限定范围去改 st.Repos —— 那会污染状态并被 save() 写回磁盘。
@@ -105,8 +111,9 @@ type model struct {
 // Run 启动交互面板。statusPreset 决定初始视图。
 // subset 为空表示全集；非空时面板只在Scope这批仓库里工作，但读写的仍是 st 里的同一批对象，
 // 所以标注结果照常落盘，只是别的仓库不出现在屏幕上。
-func Run(st *state.State, roots []string, query, statusPreset string, subset []*state.Repo, scopeLabel string, save func() error) error {
+func Run(st *state.State, roots []string, query, statusPreset string, subset []*state.Repo, scopeLabel string, save func() error, openTig OpenTig) error {
 	m := newModel(st, roots, query, statusPreset, subset, scopeLabel, save)
+	m.openTig = openTig
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return err
@@ -554,6 +561,37 @@ func (m model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "e":
 		return m.toggleFold()
+	case "g":
+		return m.openInTig()
+	}
+	return m, nil
+}
+
+// openInTig 把光标下的仓库丢给 tig，只作用于光标所在行。
+//
+// 勾选多行时不批量开：一次弹五个 tig 窗口只会更乱，而且看不完还得一个个关。
+// 真有勾选就把这句话说出来，免得你以为"勾了 5 个所以会开 5 个"。
+func (m model) openInTig() (tea.Model, tea.Cmd) {
+	cur := m.currentRow()
+	if cur == nil {
+		return m, nil
+	}
+	if cur.fold != nil {
+		m.msg = "折叠起来的是一个目录，不是仓库 · e 展开后选中具体那个"
+		return m, nil
+	}
+	if m.openTig == nil {
+		m.msg = "没接上 tig · 退出后用 grscan tig <关键字> 看是什么挡住了"
+		return m, nil
+	}
+	info, err := m.openTig(cur.r)
+	if err != nil {
+		m.msg = err.Error()
+		return m, nil
+	}
+	m.msg = fmt.Sprintf("已打开 %s · %s", cur.r.Name, info)
+	if n := m.selectedCount(); n > 0 {
+		m.msg += fmt.Sprintf(" （g 只看光标这一行，不是已勾选的 %d 项）", n)
 	}
 	return m, nil
 }
@@ -778,8 +816,8 @@ func (m model) hintBar() string {
 		}, limit)
 	}
 	return joinHints([]keyHint{
-		{"↑↓", "移动"}, {"空格", "勾选"}, {"d", "已处理"}, {"q", "退出保存"},
-		{"?", "帮助"}, {"G", "分组"}, {"v", "视图"}, {"F", "过滤"}, {"o", "打开"},
+		{"↑↓", "移动"}, {"空格", "勾选"}, {"d", "已处理"}, {"g", "tig"},
+		{"q", "退出保存"}, {"?", "帮助"}, {"G", "分组"}, {"v", "视图"}, {"F", "过滤"}, {"o", "打开"},
 	}, limit)
 }
 
@@ -1056,7 +1094,8 @@ func (m model) helpView() string {
 		"  忽略    I 忽略/取消忽略（忽略后下次 scan 会在父目录整棵跳过）\n" +
 		"  折叠    e 临时折叠/展开光标所在目录（仅本次会话，要持久用 grscan fold）\n" +
 		"  视图    v 待处理/全部/已忽略  F 过滤路径 c 清除过滤\n" +
-		"  其它    o 资源管理器打开     r 查看详情  p 显示完整路径\n" +
+		"  看进去  g 用 tig 打开（新窗口，按这个仓库的状态选开屏位置）\n" +
+		"  其它    o 资源管理器打开   r 查看详情   p 显示完整路径\n" +
 		"  保存    Ctrl+S 立即保存      q 退出并保存        Ctrl+C 放弃改动退出\n\n" +
 		"  提示:  按 d 的行会直接从“待处理”视图消失，适合从头往下快速清场。\n" +
 		"         G / T / N / F 会进入输入状态，Enter 确认、Esc 取消。\n" +

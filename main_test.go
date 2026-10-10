@@ -102,6 +102,83 @@ func TestCompleteFilePathReadsDisk(t *testing.T) {
 	}
 }
 
+// hide / fold 的相对路径必须以作用域为基准，不能拿进程 cwd 冒充
+func TestRequireDirArgUsesScopeBase(t *testing.T) {
+	st := &state.State{}
+	for _, p := range []string{
+		`D:\repos\ryxl_rd\algorithm\a.git`,
+		`D:\repos\ryxl_rd\algorithm\b.git`,
+		`D:\repos\other\c.git`,
+	} {
+		st.Repos = append(st.Repos, &state.Repo{
+			ID: util.NormalizePath(p), Path: p, Name: filepath.Base(p), Kind: "repo",
+		})
+	}
+	res, err := scope.Resolve(scope.Scope{
+		Segs: []scope.Seg{{Dim: scope.DimFile, Ident: `D:\repos`}},
+	}, st)
+	if err != nil {
+		t.Fatalf("Resolve 出错: %v", err)
+	}
+	ctx := &appCtx{state: st, res: res}
+
+	got, ok := requireDirArg(ctx, parseArgs([]string{"ryxl_rd"}), "hide")
+	if !ok {
+		t.Fatal("解析失败")
+	}
+	if want := filepath.Join(`D:\repos`, "ryxl_rd"); got != want {
+		t.Fatalf("应解析成 %s，实际 %s", want, got)
+	}
+}
+
+// 作用域里没有 file 段时无从推断，退回进程 cwd —— 但必须把基准说出来
+func TestRequireDirArgFallsBackToCWD(t *testing.T) {
+	root := t.TempDir()
+	wd, _ := os.Getwd()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+
+	st := &state.State{Repos: []*state.Repo{
+		{ID: util.NormalizePath(`D:\repos\a`), Path: `D:\repos\a`, Name: "a", Kind: "repo"},
+	}}
+	res, err := scope.Resolve(scope.Scope{Source: scope.SourceRoot}, st)
+	if err != nil {
+		t.Fatalf("Resolve 出错: %v", err)
+	}
+	ctx := &appCtx{state: st, res: res}
+
+	got, ok := requireDirArg(ctx, parseArgs([]string{"sub"}), "hide")
+	if !ok {
+		t.Fatal("解析失败")
+	}
+	if want := filepath.Join(root, "sub"); got != want {
+		t.Fatalf("应退回进程目录解析成 %s，实际 %s", want, got)
+	}
+}
+
+// 盖住 0 个仓库的规则不许落盘：静默写一条永远不生效的规则比报错危险
+func TestGuardEmptyRuleRejects(t *testing.T) {
+	st := &state.State{Repos: []*state.Repo{
+		{ID: util.NormalizePath(`D:\repos\ryxl_rd\algorithm\a.git`), Path: `D:\repos\ryxl_rd\algorithm\a.git`, Name: "a", Kind: "repo"},
+	}}
+	res, err := scope.Resolve(scope.Scope{Source: scope.SourceRoot}, st)
+	if err != nil {
+		t.Fatalf("Resolve 出错: %v", err)
+	}
+	ctx := &appCtx{state: st, res: res}
+
+	// 打字打错：repos 下没有 algoritm 这一层
+	if guardEmptyRule(ctx, filepath.Join(`D:\repos`, "ryxl_rd", "algoritm"), "hide") {
+		t.Fatal("盖住 0 个仓库却放行了")
+	}
+	// 真的有仓库的那条要放行
+	if !guardEmptyRule(ctx, `D:\repos\ryxl_rd`, "hide") {
+		t.Fatal("盖住 1 个仓库却被拦下")
+	}
+}
+
 // 嵌套节点上"看它自己"的入口也要能补出来
 func TestCompleteCdNestedOffersRepoPrefix(t *testing.T) {
 	self := `D:\repos\opensource`
