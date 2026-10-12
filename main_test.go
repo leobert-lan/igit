@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,11 +15,11 @@ import (
 // completed 还原 Tab 会补出什么：已输入的部分 + readline 返回的剩余。
 func completed(c replCompleter, line string) []string {
 	rs := []rune(line)
-	newLines, n := c.Do(rs, len(rs))
+	newLines, _ := c.Do(rs, len(rs))
 	if len(newLines) == 0 {
 		return nil
 	}
-	head := string(rs[:n])
+	head := string(rs)
 	out := make([]string, 0, len(newLines))
 	for _, nl := range newLines {
 		out = append(out, head+string(nl))
@@ -203,3 +204,334 @@ func TestCompleteCdNestedOffersRepoPrefix(t *testing.T) {
 		t.Fatalf("opensource 出现了 %d 次: %q", n, got)
 	}
 }
+
+// help 后能补出各个专题和命令
+func TestCompleteHelpTopics(t *testing.T) {
+	ctx := mkCtx(t, `D:\work\a`)
+	c := replCompleter{ctx: ctx}
+	got := strings.Join(completed(c, "help "), " ")
+	for _, want := range []string{"scope", "filter", "tig", "rules", "config", "all", "scan", "list"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("help 后应能补出 %s，实际: %q", want, got)
+		}
+	}
+
+	gotSc := strings.Join(completed(c, "help sc"), " ")
+	if !strings.Contains(gotSc, "scope") || !strings.Contains(gotSc, "scan") {
+		t.Fatalf("help sc 应补出 scope 和 scan，实际: %q", gotSc)
+	}
+}
+
+// 帮助主题规范化：别名与前缀支持
+func TestNormalizeHelpTopic(t *testing.T) {
+	cases := map[string]string{
+		"scope":    "scope",
+		"--scope":  "scope",
+		"-s":       "scope",
+		"--filter": "filter",
+		"-f":       "filter",
+		"--tig":    "tig",
+		"-t":       "tig",
+		"--rules":  "rules",
+		"--config": "config",
+		"-c":       "config",
+		"--all":    "all",
+		"-a":       "all",
+	}
+	for in, want := range cases {
+		if got := normalizeHelpTopic(in); got != want {
+			t.Errorf("normalizeHelpTopic(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCmdGroupNewAndList(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st}
+
+	// 1. 新建分组 study
+	code := cmdGroup(ctx, args{pos: []string{"new", "study"}})
+	if code != 0 {
+		t.Fatalf("group new study 失败: exit code %d", code)
+	}
+	if !st.HasGroup("study") {
+		t.Fatal("state 未包含 study 分组")
+	}
+
+	// 2. 重新从磁盘加载 state，验证持久化生效
+	st2, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st2.HasGroup("study") {
+		t.Fatal("持久化文件中未包含 study 分组")
+	}
+
+	// 3. 删除分组
+	ctx2 := &appCtx{state: st2}
+	code = cmdGroup(ctx2, args{pos: []string{"rm", "study"}})
+	if code != 0 {
+		t.Fatalf("group rm study 失败: exit code %d", code)
+	}
+	if st2.HasGroup("study") {
+		t.Fatal("删除后 state 仍包含 study 分组")
+	}
+}
+
+func TestRequireDirArgDotInRepoAndDir(t *testing.T) {
+	st := &state.State{Repos: []*state.Repo{
+		{ID: util.NormalizePath(`D:\work\repo1`), Path: `D:\work\repo1`, Name: "repo1", Kind: "repo"},
+		{ID: util.NormalizePath(`D:\work\repo2`), Path: `D:\work\repo2`, Name: "repo2", Kind: "repo"},
+	}}
+
+	// 1. 处于单仓作用域
+	scRepo, err := scope.Parse(`file:D:\work\repo1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resRepo, err := scope.Resolve(scRepo, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxRepo := &appCtx{state: st, res: resRepo}
+	got, ok := requireDirArg(ctxRepo, parseArgs([]string{"."}), "hide")
+	if !ok {
+		t.Fatal("requireDirArg '.' 应成功解析")
+	}
+	if want := filepath.Clean(`D:\work\repo1`); got != want {
+		t.Fatalf("单仓下 '.' 应解析为 %s，实际 %s", want, got)
+	}
+
+	// 2. 处于物理目录作用域
+	scDir, err := scope.Parse(`file:D:\work`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resDir, err := scope.Resolve(scDir, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxDir := &appCtx{state: st, res: resDir}
+	got, ok = requireDirArg(ctxDir, parseArgs([]string{"."}), "fold")
+	if !ok {
+		t.Fatal("requireDirArg '.' 应成功解析")
+	}
+	if want := filepath.Clean(`D:\work`); got != want {
+		t.Fatalf("目录下 '.' 应解析为 %s，实际 %s", want, got)
+	}
+}
+
+func TestRequireDirArgDotAtRootFails(t *testing.T) {
+	st := &state.State{Repos: []*state.Repo{
+		{ID: util.NormalizePath(`D:\work\repo1`), Path: `D:\work\repo1`, Name: "repo1", Kind: "repo"},
+	}}
+	res, err := scope.Resolve(scope.Scope{Source: scope.SourceRoot}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res}
+	_, ok := requireDirArg(ctx, parseArgs([]string{"."}), "hide")
+	if ok {
+		t.Fatal("根目录下 '.' 应被拦截报错")
+	}
+}
+
+func TestCmdHideAndFoldDotConfirmation(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Join(tmpDir, "work")
+	repoPath := filepath.Join(workDir, "myrepo")
+	otherPath := filepath.Join(workDir, "otherrepo")
+	st.Repos = append(st.Repos,
+		&state.Repo{ID: util.NormalizePath(repoPath), Path: repoPath, Name: "myrepo", Kind: "repo"},
+		&state.Repo{ID: util.NormalizePath(otherPath), Path: otherPath, Name: "otherrepo", Kind: "repo"},
+	)
+	_ = st.Save()
+
+	sc, err := scope.Parse("file:" + repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 1. 用户输入 n 取消
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("n\n"))
+	code := cmdHide(ctx, parseArgs([]string{"."}), true)
+	if code != 0 {
+		t.Fatalf("cmdHide 取消返回码错误: %d", code)
+	}
+	if st.IsHidden(repoPath) {
+		t.Fatal("取消后不应该隐藏仓库")
+	}
+
+	// 2. 用户输入 y 确认
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("y\n"))
+	code = cmdHide(ctx, parseArgs([]string{"."}), true)
+	if code != 0 {
+		t.Fatalf("cmdHide 确认返回码错误: %d", code)
+	}
+	if !st.IsHidden(repoPath) {
+		t.Fatal("确认后仓库应被隐藏")
+	}
+	// 验证退回了上一级作用域（workDir 包含 otherrepo）
+	if ctx.res.TargetRepo() != nil {
+		t.Fatalf("隐藏当前仓后应该步进到上层作用域，实际仍停留在: %v", ctx.res.TargetRepo().Path)
+	}
+	if gotBase := ctx.res.Scope.BaseDir(); gotBase != workDir {
+		t.Fatalf("步进后的作用域应为 %s，实际 %s", workDir, gotBase)
+	}
+
+	// 3. 在当前目录作用域下执行 fold . -y
+	code = cmdFold(ctx, parseArgs([]string{".", "-y"}), true)
+	if code != 0 {
+		t.Fatalf("cmdFold -y 返回码错误: %d", code)
+	}
+	folded := st.FoldedPaths()
+	if len(folded) == 0 || folded[0] != workDir {
+		t.Fatalf("fold . 应将 %s 记录进 FoldedPaths，实际: %v", workDir, folded)
+	}
+}
+
+func TestCmdGroupInteractiveAndConfirmation(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoPath := filepath.Join(tmpDir, "repo-a")
+	repo := &state.Repo{ID: util.NormalizePath(repoPath), Path: repoPath, Name: "repo-a", Kind: "repo"}
+	st.Repos = append(st.Repos, repo)
+	st.AddGroup("study")
+	st.AddGroup("job")
+	_ = st.Save()
+
+	sc, err := scope.Parse("file:" + repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 1. 在单仓下输入 group，交互式选择 1 (job，按字母序排第一)
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("1\n"))
+	code := cmdGroup(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("cmdGroup 交互选择返回码错误: %d", code)
+	}
+	if repo.Group != "job" {
+		t.Fatalf("期望 repo.Group = job, 实际: %s", repo.Group)
+	}
+
+	// 2. 在单仓下输入 group，交互式选择 2 (study)，但确认时输入 n
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("2\nn\n"))
+	code = cmdGroup(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("cmdGroup 取消返回码错误: %d", code)
+	}
+	if repo.Group != "job" {
+		t.Fatalf("取消替换后分组应保持 job, 实际: %s", repo.Group)
+	}
+
+	// 3. 在单仓下输入 group，交互式选择 2 (study)，确认时输入 y
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("2\ny\n"))
+	code = cmdGroup(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("cmdGroup 确认替换返回码错误: %d", code)
+	}
+	if repo.Group != "study" {
+		t.Fatalf("确认替换后分组应为 study, 实际: %s", repo.Group)
+	}
+
+	// 4. 在单仓下输入 group clear 清除分组
+	code = cmdGroup(ctx, parseArgs([]string{"clear"}))
+	if code != 0 {
+		t.Fatalf("group clear 返回码错误: %d", code)
+	}
+	if repo.Group != "" {
+		t.Fatalf("clear 后分组应为空, 实际: %s", repo.Group)
+	}
+
+	// 5. 快速快捷设置 group study，再快捷设置 group job (测试带 -y 与不带 -y)
+	code = cmdGroup(ctx, parseArgs([]string{"study"}))
+	if code != 0 || repo.Group != "study" {
+		t.Fatalf("快捷分配 study 失败: code %d, group %s", code, repo.Group)
+	}
+	// 不带 -y 且输入 n
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("n\n"))
+	code = cmdGroup(ctx, parseArgs([]string{"job"}))
+	if code != 0 || repo.Group != "study" {
+		t.Fatalf("快捷替换取消失败: code %d, group %s", code, repo.Group)
+	}
+	// 带 -y 自动放行
+	code = cmdGroup(ctx, parseArgs([]string{"job", "-y"}))
+	if code != 0 || repo.Group != "job" {
+		t.Fatalf("带 -y 快捷替换失败: code %d, group %s", code, repo.Group)
+	}
+}
+
+func TestCmdGroupInGroupScope(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoPath1 := filepath.Join(tmpDir, "repo-1")
+	repoPath2 := filepath.Join(tmpDir, "repo-2")
+	r1 := &state.Repo{ID: util.NormalizePath(repoPath1), Path: repoPath1, Name: "repo-1", Group: "study", Kind: "repo"}
+	r2 := &state.Repo{ID: util.NormalizePath(repoPath2), Path: repoPath2, Name: "repo-2", Group: "study", Kind: "repo"}
+	st.Repos = append(st.Repos, r1, r2)
+	st.AddGroup("study")
+	_ = st.Save()
+
+	sc, err := scope.Parse("group:study")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 在 group:study 作用域下，输入 group rm，通过交互式选项选 1 移出 repo-1
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("1\n"))
+	code := cmdGroup(ctx, parseArgs([]string{"rm"}))
+	if code != 0 {
+		t.Fatalf("group rm 移出失败: exit code %d", code)
+	}
+	if r1.Group != "" {
+		t.Fatalf("repo-1 应被移出分组, 实际 group=%s", r1.Group)
+	}
+	if r2.Group != "study" {
+		t.Fatalf("repo-2 应保留在分组 study, 实际 group=%s", r2.Group)
+	}
+
+	// 在 group:study 作用域下，输入 group add repo-1 把 repo-1 拉回 study
+	code = cmdGroup(ctx, parseArgs([]string{"add", "repo-1"}))
+	if code != 0 {
+		t.Fatalf("group add 失败: exit code %d", code)
+	}
+	if r1.Group != "study" {
+		t.Fatalf("repo-1 应被拉入 study, 实际 group=%s", r1.Group)
+	}
+}
+
+

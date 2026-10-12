@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,127 +32,6 @@ import (
 
 const version = "0.1.0"
 
-const usageText = `igit - 本地 git 仓库扫描与整理工具
-
-用法:
-  igit [--home <dir>] [<命令>] [选项]
-
-进会话:
-  igit                 进去待着。提示符带当前作用域，Tab 补全，exit 退出
-  igit <命令>          一次性执行一条就出来，给脚本和管道留的口子
-
-作用域命令（导航，会话内）:
-  cd <作用域>              走进去，例: cd tag:待推送
-  cd ..                    上一层        cd /  回到全集
-  cd -                     回到来路（上一个作用域）
-  cd .                     回到按当前目录推断的位置
-  ls                       当前作用域下有什么
-  pwd                      我在哪
-
-作用域写法:
-  tag:待推送               标签维度          group:工作     分组维度
-  file:D:\repos            目录维度
-  group:工作/tag:待推送     交集：工作分组里待推送的
-  tag:待推送/scan_git       进入单个仓库（此时 show / log / open 可用）
-  ":" 与 "#" 都认，输出统一用 ":"
-
-数据命令（在当前作用域这批仓库里生效）:
-  scan                     扫描配置的根目录（在目录/仓库下原位刷新），并入状态文件
-  list                     列出仓库（默认只看"待处理"），路径默认显示完整
-  tree                     按磁盘目录树展开仓库，看空间分布
-  triage (tui)             交互式面板，逐个判别/分组/归档
-  group [list|new|set]     管理分组，单仓下直接 group set <名>
-  tag [list|add|rm]        管理标签，单仓下直接 tag add <标签>
-  status [状态]            查看或设置状态 (new|active|done|archived)
-  note [内容]              查看或记录备注
-  set <关键字>             批量设置分组/状态/标签/备注/忽略
-  dupes                    查找重复克隆（单仓下查全盘克隆副本）
-  stats                    统计概览（单仓下看仓库画像）
-  open [关键字]            在资源管理器里打开目录（单仓下直接打开）
-  tig [关键字]             新终端窗口用 tig 打开（单仓下直接打开）
-  rm <关键字>              从清单里删除记录
-  prune                    清理磁盘上已不存在且未忽略的记录
-
-目录级规则:
-  hide <目录>              整个目录不再出现，扫描也整棵跳过
-  unhide <目录>            取消隐藏
-  fold <目录>              整个目录收拢成一行，只显示数量
-  unfold <目录>            取消折叠
-  dirs                     列出当前所有隐藏/折叠规则
-
-配置命令:
-  config show              查看当前配置与数据目录
-  config init              重建默认配置
-  config discover          探查各盘，推荐可能含仓库的目录
-  config add-root <dir>    添加扫描根
-  config rm-root <dir>     移除扫描根
-  config add-exclude <n>   添加跳过的目录名（支持 * 通配）
-  config rm-exclude <n>    移除跳过的目录名
-  config set k=v           直接改配置（jobs / max-depth / fast / deep / git-exe / tig-exe / term-cmd）
-
-导出:
-  export --format=md|outline|csv|json [-o 文件]
-      md       按目录分节的报告（默认）：概览 + 值得先看的几类 + 目录明细
-      outline  只有目录树骨架，看清分布格局
-      csv      带 BOM，Excel 直接打开
-      json     原始结构化数据，喂给别的脚本或模型
-
-tig 联动:
-  igit tig <关键字>              按仓库状态选开屏位置，省掉"我为什么打开它来着"
-      有未提交改动 → status 视图      领先远端 → 只看没推上去的那几个提交
-      没配上游    → refs 视图         其它     → 主视图（提交历史）
-  igit tig <关键字> --view=status  强制停在某一屏（auto/main/status/log/refs）
-  igit tig <关键字> --print        只打印要跑的命令行，不弹窗口
-  triage 面板里按 g                直接打开光标所在的那个仓库
-
-  对象只看当前作用域。站在集合里就给关键字，站在具体仓库上就不用给 ——
-  这时再给关键字会报错：这一层只负责定视图。命中 0 个或多个会列出编号候选，不替你选。
-  log / main / status / refs 是视图保留字；仓库真叫这些名字时用 --repo=log。
-  igit config set tig-exe=<路径>   tig 不在 PATH 时指定它
-  igit config set term-cmd=...     指定用什么终端拉起，占位符 {dir} {cmd}
-
-通用选项:
-  --home <dir>  指定数据目录（也可用环境变量 IGIT_HOME 或 GRSCAN_HOME），默认 ~/.igit
-  --in=<作用域>  临时指定作用范围，写在命令前后都行，例: --in=file:D:\work
-
-list / tree 共用选项:
-  --all        全部
-  --ignored    已忽略的
-  --missing    磁盘上找不到的
-  --dirty      有未提交改动的
-  --clean      没有未提交改动的
-  --unpushed   有未推送提交的
-  --no-remote  没配远端的
-  --group=X    按分组名过滤
-  --tag=X      按标签过滤
-  --status=X   new|active|done|archived
-  --query=X    路径/名字包含 X
-  --sort=path|commit|name|group|status|size   --desc
-  --limit=N    最多显示 N 条
-  --width=N    表格宽度（默认 120）
-
-目录级规则示例:
-  igit hide D:\repos\ryxl_rd        这块彻底不看，扫描也不进
-  igit fold D:\repos\ryxl_rd        只保留一行"多少仓库"，不展开细节
-  igit dirs                         看看现在都设了哪些规则
-
-list 额外选项:
-  --short      压缩路径显示（默认显示完整路径）
-  --json       输出 JSON
-  --full       与默认一致，保留兼容
-
-tree 额外选项:
-  --brief      只看目录骨架与数量，不逐个列仓库
-  --depth=N    展开到第 N 层，超出折叠成一行摘要
-
-scan 常用选项:
-  --root=<dir> 临时指定扫描根，可重复；不给则用配置里的
-  --fast       不调用 git，只读 .git 目录，快很多但拿不到改动
-  --deep       命中仓库后仍继续往下钻（默认不下钻，所以平时扫不出嵌套仓库）
-  --size       统计仓库体积（会慢不少）
-  --jobs=N     并发数
-  --max-depth=N  目录最大下钻深度
-`
 
 type appCtx struct {
 	home    string
@@ -161,7 +41,9 @@ type appCtx struct {
 	state   *state.State
 	res     *scope.Resolved // 当前作用域，按需解析
 	prev    *scope.Resolved // 上一个作用域，cd - 用
-	repl    bool            // 是否处于交互会话里
+	repl        bool               // 是否处于交互会话里
+	rl          *readline.Instance // 会话内的交互式 readline 实例
+	pipeScanner *bufio.Scanner     // 管道会话模式下的 scanner
 }
 
 func main() {
@@ -170,18 +52,20 @@ func main() {
 
 func run(raw []string) int {
 	raw, homeFlag := takeGlobalHome(raw)
+	if len(raw) > 0 {
+		switch raw[0] {
+		case "-h", "--help", "help":
+			printHelp(raw[1:])
+			return 0
+		case "-v", "--version", "version":
+			fmt.Printf("igit %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
+			return 0
+		}
+	}
 	raw, scopeFlag := takeGlobalScope(raw)
 	cmd := ""
 	if len(raw) > 0 {
 		cmd, raw = raw[0], raw[1:]
-	}
-	switch cmd {
-	case "-h", "--help", "help":
-		fmt.Print(usageText)
-		return 0
-	case "-v", "--version", "version":
-		fmt.Printf("igit %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
-		return 0
 	}
 
 	home := config.ResolveHome(homeFlag)
@@ -251,6 +135,9 @@ func needsHardScope(cmd string) bool {
 // dispatch 执行一条指令。一次性命令与 REPL 共用同一套分发，
 // 区别只在 REPL 里 cd 改的是会话内状态，进程退出就没了。
 func dispatch(ctx *appCtx, cmd string, a args) int {
+	if a.has("help", "h") {
+		return printCommandHelp(cmd)
+	}
 	switch cmd {
 	case "cd":
 		return cmdCd(ctx, a)
@@ -304,7 +191,7 @@ func dispatch(ctx *appCtx, cmd string, a args) int {
 		return cmdConfig(ctx, a)
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令: %s\n\n", cmd)
-		fmt.Print(usageText)
+		printHelp(nil)
 		return 2
 	}
 }
@@ -332,6 +219,8 @@ func runREPL(ctx *appCtx) int {
 		return replPipe(ctx, bufio.NewReader(os.Stdin))
 	}
 	defer rl.Close()
+	ctx.rl = rl
+	defer func() { ctx.rl = nil }()
 
 	for {
 		rl.SetPrompt(prompt(ctx))
@@ -436,18 +325,25 @@ func candidates(ctx *appCtx, head, word string) []string {
 		}
 	case "status":
 		return matchPrefix([]string{"new", "active", "done", "archived", "待处理", "跟进中", "已处理", "已归档"}, word)
+	case "help":
+		return matchPrefix(helpTopicNames(), word)
 	}
 	return nil
 }
 
 func allGroupNames(ctx *appCtx) []string {
-	m := map[string]bool{}
-	for _, r := range ctx.state.Repos {
-		if r.Group != "" {
-			m[r.Group] = true
+	if ctx == nil || ctx.state == nil {
+		return nil
+	}
+	return ctx.state.AllGroups()
+}
+
+func refreshCurrentScope(ctx *appCtx) {
+	if ctx != nil && ctx.res != nil && ctx.state != nil {
+		if res, err := scope.Resolve(ctx.res.Scope, ctx.state); err == nil {
+			ctx.res = res
 		}
 	}
-	return util.SortedKeys(m)
 }
 
 func allTagNames(ctx *appCtx) []string {
@@ -600,6 +496,8 @@ func replPipe(ctx *appCtx, in *bufio.Reader) int {
 	ctx.repl = true
 	fmt.Printf("igit %s · %s\n", version, scopeLine(ctx.res))
 	sc := bufio.NewScanner(in)
+	ctx.pipeScanner = sc
+	defer func() { ctx.pipeScanner = nil }()
 	for {
 		fmt.Print(prompt(ctx))
 		if !sc.Scan() {
@@ -645,7 +543,7 @@ func execLine(ctx *appCtx, line string) {
 	}
 	cmd, rest := toks[0], toks[1:]
 	if cmd == "help" || cmd == "?" {
-		cmdHelp(ctx)
+		cmdHelp(ctx, rest)
 		return
 	}
 	dispatch(ctx, cmd, parseArgs(rest))
@@ -700,18 +598,6 @@ func tokenize(s string) []string {
 	return out
 }
 
-// cmdHelp 会话里的帮助：先说这个界面能做什么，再附完整用法。
-func cmdHelp(ctx *appCtx) {
-	if ctx.res != nil {
-		fmt.Printf("作用域  %s · %d 个仓库\n\n", scopeLabel(ctx.res), ctx.res.Totals.Repos)
-		fmt.Println("  这个界面可以敲")
-		for _, act := range availableActions(ctx.res) {
-			fmt.Printf("    %s%s\n", util.PadRightDisplay(act.cmd, 14), act.desc)
-		}
-		fmt.Println()
-	}
-	fmt.Print(usageText)
-}
 
 // ---------------------------------------------------------------- 参数解析
 
@@ -961,6 +847,17 @@ func pickTarget(ctx *appCtx, cmd, kw string) *state.Repo {
 	}, kw)
 }
 
+func pickTargetGlobal(ctx *appCtx, cmd, kw string) *state.Repo {
+	var in io.Reader
+	if ctx.repl {
+		in = os.Stdin
+	}
+	visible := scope.Visible(ctx.state)
+	return pick.Repo(pick.Opt{
+		Cmd: cmd, Label: "全集", Pool: visible, All: ctx.state.Repos, In: in, Out: os.Stdout,
+	}, kw)
+}
+
 // poolHits 把全清单的命中收窄到作用域内。
 //
 // 批量命令（set / rm）一次本来就能吃多个宾语，所以不走 pickTarget 的单数语义，
@@ -1124,6 +1021,7 @@ func availableActions(res *scope.Resolved) []action {
 
 // cmdLs 列当前作用域的子项（导航语义，不受"只看待处理"过滤）。
 func cmdLs(ctx *appCtx, a args) int {
+	refreshCurrentScope(ctx)
 	res := ctx.res
 	printScopeHead(res)
 	fmt.Println()
@@ -1154,7 +1052,7 @@ func cmdLs(ctx *appCtx, a args) int {
 				if it.Facet != f.dim {
 					continue
 				}
-				if it.Count == 0 {
+				if it.Count == 0 && it.Target == "" {
 					fmt.Printf("    %s\n", it.Label)
 					continue
 				}
@@ -1181,12 +1079,16 @@ func cmdLs(ctx *appCtx, a args) int {
 	}
 	fmt.Println()
 	fmt.Println("  子项")
-	for _, it := range res.Children {
-		if it.Facet == scope.DimRepo {
-			fmt.Printf("    %s%s\n", util.PadRightDisplay(it.Label, 26), it.Summary)
-			continue
+	if len(res.Children) == 0 {
+		fmt.Println("    （暂无仓库）")
+	} else {
+		for _, it := range res.Children {
+			if it.Facet == scope.DimRepo {
+				fmt.Printf("    %s%s\n", util.PadRightDisplay(it.Label, 26), it.Summary)
+				continue
+			}
+			fmt.Printf("    %s%d 个\n", util.PadRightDisplay(it.Label, 26), it.Count)
 		}
-		fmt.Printf("    %s%d 个\n", util.PadRightDisplay(it.Label, 26), it.Count)
 	}
 	return 0
 }
@@ -1853,8 +1755,7 @@ func cmdSet(ctx *appCtx, a args) int {
 		fmt.Println("  " + v.Row(r))
 	}
 	if len(list) > 1 && !a.has("yes", "y") {
-		fmt.Printf("确认修改这 %d 个? [y/N] ", len(list))
-		if !confirm() {
+		if !confirmPrompt(ctx, fmt.Sprintf("确认修改这 %d 个? [y/N] ", len(list))) {
 			fmt.Println("已取消。")
 			return 0
 		}
@@ -1923,6 +1824,271 @@ func cmdSet(ctx *appCtx, a args) int {
 	return 0
 }
 
+// printAllGroupsWithHints 列出所有分组并附带交互式引导提示。
+func printAllGroupsWithHints(ctx *appCtx) int {
+	all := ctx.state.AllGroups()
+	if len(all) == 0 {
+		fmt.Println("当前尚未创建任何分组。可用 'group new <名称>' 或 'set --group=<名称>' 创建。")
+		return 0
+	}
+	groups := map[string]int{}
+	for _, r := range ctx.state.Repos {
+		if r.Group != "" {
+			groups[r.Group]++
+		}
+	}
+	fmt.Println("现有分组:")
+	for _, k := range all {
+		fmt.Printf("  %-20s %d 个仓库\n", k, groups[k])
+	}
+	fmt.Println("\n提示:")
+	fmt.Println("  在单仓下输入 'group' 可直接按编号分配/切换分组;")
+	fmt.Println("  在全集下输入 'group <仓库名>' 可为指定仓库选择分组;")
+	fmt.Println("  输入 'group new <名称>' 可新建空分组。")
+	return 0
+}
+
+// pickGroupForRepo 为指定仓库交互式挑选目标分组（依据现有分组编号选择，支持新建与清除）。
+// @design docs/DESIGN-group-tag.md#31-仓库选择分组菜单原型-pickgroupforrepo
+func pickGroupForRepo(ctx *appCtx, r *state.Repo) bool {
+	all := ctx.state.AllGroups()
+	curGroup := r.Group
+
+	if curGroup == "" {
+		fmt.Printf("\n仓库: %s (当前未设置分组)\n", r.Name)
+	} else {
+		fmt.Printf("\n仓库: %s (当前分组: %s)\n", r.Name, curGroup)
+	}
+
+	if len(all) == 0 {
+		fmt.Println("当前尚未创建任何分组。")
+		fmt.Println("  +) [新建分组并加入...]")
+		fmt.Println("  q) 取消")
+		fmt.Println()
+		choice := readPrompt(ctx, "请选择 (+ / q 取消): ")
+		if choice == "+" || strings.EqualFold(choice, "new") || strings.EqualFold(choice, "add") {
+			name := readPrompt(ctx, "请输入新分组名称: ")
+			name = strings.TrimSpace(name)
+			if name == "" {
+				fmt.Println("分组名称不能为空，已取消。")
+				return false
+			}
+			r.Group = name
+			r.ReviewedAt = time.Now().Format(time.RFC3339)
+			state.Canonicalize(r)
+			ctx.state.AddGroup(name)
+			if err := ctx.state.Save(); err != nil {
+				fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+				return false
+			}
+			refreshCurrentScope(ctx)
+			fmt.Printf("已创建分组并设置 %s 为: %s\n", r.Name, r.Group)
+			return true
+		}
+		fmt.Println("已取消。")
+		return false
+	}
+
+	fmt.Println("\n请选择目标分组:")
+	for i, g := range all {
+		mark := "  "
+		if strings.EqualFold(g, curGroup) {
+			mark = "[√]"
+		}
+		fmt.Printf("  %2d) %s %s\n", i+1, mark, g)
+	}
+	fmt.Println("   +) [新建分组...]")
+	if curGroup != "" {
+		fmt.Println("   0) [清除分组] (移出当前分组)")
+	}
+	fmt.Println()
+
+	choice := readPrompt(ctx, "请选择 (编号 / + / 0 / q 取消): ")
+	if choice == "" || strings.EqualFold(choice, "q") || strings.EqualFold(choice, "quit") {
+		fmt.Println("已取消。")
+		return false
+	}
+
+	var targetGroup string
+	switch choice {
+	case "0", "clear", "unset":
+		if curGroup == "" {
+			fmt.Println("当前尚未设置分组，无需清除。")
+			return false
+		}
+		r.Group = ""
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		if err := ctx.state.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+			return false
+		}
+		refreshCurrentScope(ctx)
+		fmt.Printf("已清除 %s 的分组。\n", r.Name)
+		return true
+	case "+", "new", "add":
+		name := readPrompt(ctx, "请输入新分组名称: ")
+		name = strings.TrimSpace(name)
+		if name == "" {
+			fmt.Println("分组名称不能为空，已取消。")
+			return false
+		}
+		targetGroup = name
+	default:
+		idx, err := strconv.Atoi(choice)
+		if err == nil && idx >= 1 && idx <= len(all) {
+			targetGroup = all[idx-1]
+		} else {
+			if ctx.state.HasGroup(choice) {
+				targetGroup = choice
+			} else {
+				fmt.Printf("无效的选项: %s\n", choice)
+				return false
+			}
+		}
+	}
+
+	if strings.EqualFold(targetGroup, curGroup) {
+		fmt.Printf("仓库 %s 已属于分组 [%s]，无需变更。\n", r.Name, curGroup)
+		return false
+	}
+
+	// 唯一性替换确认：若原先已有分组且不同，必须确认
+	if curGroup != "" {
+		if !confirmPrompt(ctx, fmt.Sprintf("仓库 %s 当前属于 [%s]，确认变更为 [%s]? [y/N] ", r.Name, curGroup, targetGroup)) {
+			fmt.Println("已取消。")
+			return false
+		}
+	}
+
+	r.Group = targetGroup
+	r.ReviewedAt = time.Now().Format(time.RFC3339)
+	state.Canonicalize(r)
+	ctx.state.AddGroup(targetGroup)
+	if err := ctx.state.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+		return false
+	}
+	refreshCurrentScope(ctx)
+	fmt.Printf("已将 %s 分组设置为: %s\n", r.Name, r.Group)
+	return true
+}
+
+// pickRepoToRemoveFromGroup 在分组作用域下交互式列出组内仓库并移出。
+// @design docs/DESIGN-group-tag.md#33-分组内移出仓库原型-pickrepotoremovefromgroup
+func pickRepoToRemoveFromGroup(ctx *appCtx, grpName string) bool {
+	var repos []*state.Repo
+	for _, r := range ctx.state.Repos {
+		if strings.EqualFold(r.Group, grpName) {
+			repos = append(repos, r)
+		}
+	}
+	if len(repos) == 0 {
+		fmt.Printf("分组 %s 内当前没有仓库。\n", grpName)
+		return false
+	}
+
+	fmt.Printf("\n分组 %s 内的仓库 (共 %d 个):\n", grpName, len(repos))
+	for i, r := range repos {
+		fmt.Printf("  %2d) %s\n", i+1, r.Name)
+	}
+	fmt.Println()
+
+	choice := readPrompt(ctx, "请选择要移出的仓库 (序号 / q 取消): ")
+	if choice == "" || strings.EqualFold(choice, "q") || strings.EqualFold(choice, "quit") {
+		fmt.Println("已取消。")
+		return false
+	}
+
+	var target *state.Repo
+	idx, err := strconv.Atoi(choice)
+	if err == nil && idx >= 1 && idx <= len(repos) {
+		target = repos[idx-1]
+	} else {
+		for _, r := range repos {
+			if strings.EqualFold(r.Name, choice) || strings.EqualFold(r.ID, choice) {
+				target = r
+				break
+			}
+		}
+	}
+	if target == nil {
+		fmt.Printf("无效的选项: %s\n", choice)
+		return false
+	}
+
+	target.Group = ""
+	target.ReviewedAt = time.Now().Format(time.RFC3339)
+	state.Canonicalize(target)
+	if err := ctx.state.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+		return false
+	}
+	refreshCurrentScope(ctx)
+	fmt.Printf("已将 %s 从分组 %s 移出。\n", target.Name, grpName)
+	return true
+}
+
+// pickGroupActionInGroupScope 在分组作用域下输入 group 时弹出本组管理菜单。
+// @design docs/DESIGN-group-tag.md#2-作用域推断矩阵-scope-inference-matrix
+func pickGroupActionInGroupScope(ctx *appCtx, grpName string) int {
+	var count int
+	for _, r := range ctx.state.Repos {
+		if strings.EqualFold(r.Group, grpName) {
+			count++
+		}
+	}
+	fmt.Printf("\n分组: %s (共 %d 个仓库)\n", grpName, count)
+	fmt.Println("  1) 移出仓库 (rm / clear)")
+	fmt.Println("  2) 添加仓库 (add)")
+	fmt.Println("  3) 查看所有分组 (list)")
+	fmt.Println()
+
+	choice := readPrompt(ctx, "请选择操作 (编号 / q 取消): ")
+	switch choice {
+	case "1", "rm", "clear":
+		pickRepoToRemoveFromGroup(ctx, grpName)
+		return 0
+	case "2", "add":
+		kw := readPrompt(ctx, "请输入要加入该分组的仓库名称/关键字: ")
+		if kw == "" {
+			fmt.Println("已取消。")
+			return 0
+		}
+		r := pickTargetGlobal(ctx, "group add", kw)
+		if r == nil {
+			return 2
+		}
+		if strings.EqualFold(r.Group, grpName) {
+			fmt.Printf("仓库 %s 当前已在分组 %s 中。\n", r.Name, grpName)
+			return 0
+		}
+		if r.Group != "" {
+			if !confirmPrompt(ctx, fmt.Sprintf("仓库 %s 当前属于 [%s]，确认变更为 [%s]? [y/N] ", r.Name, r.Group, grpName)) {
+				fmt.Println("已取消。")
+				return 0
+			}
+		}
+		r.Group = grpName
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		if err := ctx.state.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+			return 1
+		}
+		refreshCurrentScope(ctx)
+		fmt.Printf("已将 %s 加入分组: %s\n", r.Name, grpName)
+		return 0
+	case "3", "list", "ls":
+		return printAllGroupsWithHints(ctx)
+	default:
+		if choice != "" && !strings.EqualFold(choice, "q") && !strings.EqualFold(choice, "quit") {
+			fmt.Printf("无效的选项: %s\n", choice)
+		}
+		return 0
+	}
+}
+
 func cmdGroup(ctx *appCtx, a args) int {
 	sub := ""
 	if len(a.pos) > 0 {
@@ -1930,23 +2096,19 @@ func cmdGroup(ctx *appCtx, a args) int {
 	}
 	switch sub {
 	case "", "list", "ls":
-		groups := map[string]int{}
-		for _, r := range ctx.state.Repos {
-			if r.Group != "" {
-				groups[r.Group]++
+		if sub == "" {
+			if target := ctx.res.TargetRepo(); target != nil {
+				pickGroupForRepo(ctx, target)
+				return 0
+			}
+			if ctx.res != nil && ctx.res.NodeType == scope.NodeGroup && len(ctx.res.Scope.Segs) > 0 {
+				grpName := ctx.res.Scope.Segs[len(ctx.res.Scope.Segs)-1].Ident
+				return pickGroupActionInGroupScope(ctx, grpName)
 			}
 		}
-		if len(groups) == 0 {
-			fmt.Println("当前尚未创建任何分组。可用 'group new <名称>' 或 'set --group=<名称>' 创建。")
-			return 0
-		}
-		fmt.Println("现有分组:")
-		keys := util.SortedKeys(groups)
-		for _, k := range keys {
-			fmt.Printf("  %-20s %d 个仓库\n", k, groups[k])
-		}
-		return 0
-	case "new", "add", "create":
+		return printAllGroupsWithHints(ctx)
+
+	case "new", "create":
 		if len(a.pos) < 2 {
 			fmt.Println("用法: group new <分组名称>")
 			return 2
@@ -1956,24 +2118,101 @@ func cmdGroup(ctx *appCtx, a args) int {
 			fmt.Println("分组名称不能为空")
 			return 2
 		}
-		fmt.Printf("分组已就绪: %s（给仓库分配请用 'group set %s'）\n", name, name)
+		if !ctx.state.AddGroup(name) {
+			fmt.Printf("分组已存在: %s\n", name)
+			return 0
+		}
+		if err := ctx.state.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+			return 1
+		}
+		refreshCurrentScope(ctx)
+		fmt.Printf("分组已就绪: %s（给仓库分配请用 'group set <仓库> %s'）\n", name, name)
 		return 0
+
+	case "add":
+		// 在分组作用域下，group add [kw] 表示将仓库拉入当前组
+		if ctx.res != nil && ctx.res.NodeType == scope.NodeGroup && len(ctx.res.Scope.Segs) > 0 {
+			currentGroup := ctx.res.Scope.Segs[len(ctx.res.Scope.Segs)-1].Ident
+			var kw string
+			if len(a.pos) >= 2 {
+				kw = a.pos[1]
+			} else {
+				kw = readPrompt(ctx, "请输入要加入该分组的仓库名称/关键字: ")
+				if kw == "" {
+					fmt.Println("已取消。")
+					return 0
+				}
+			}
+			r := pickTargetGlobal(ctx, "group add", kw)
+			if r == nil {
+				return 2
+			}
+			if strings.EqualFold(r.Group, currentGroup) {
+				fmt.Printf("仓库 %s 当前已在分组 %s 中。\n", r.Name, currentGroup)
+				return 0
+			}
+			if r.Group != "" && !a.has("yes", "y") {
+				if !confirmPrompt(ctx, fmt.Sprintf("仓库 %s 当前属于 [%s]，确认变更为 [%s]? [y/N] ", r.Name, r.Group, currentGroup)) {
+					fmt.Println("已取消。")
+					return 0
+				}
+			}
+			r.Group = currentGroup
+			r.ReviewedAt = time.Now().Format(time.RFC3339)
+			state.Canonicalize(r)
+			if err := ctx.state.Save(); err != nil {
+				fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+				return 1
+			}
+			refreshCurrentScope(ctx)
+			fmt.Printf("已将 %s 加入分组: %s\n", r.Name, currentGroup)
+			return 0
+		}
+		// 否则作为 group new 的别名
+		if len(a.pos) < 2 {
+			fmt.Println("用法: group add <分组名称>")
+			return 2
+		}
+		name := strings.TrimSpace(a.pos[1])
+		if !ctx.state.AddGroup(name) {
+			fmt.Printf("分组已存在: %s\n", name)
+			return 0
+		}
+		_ = ctx.state.Save()
+		refreshCurrentScope(ctx)
+		fmt.Printf("分组已就绪: %s\n", name)
+		return 0
+
 	case "set":
 		var kw, grpName string
 		target := ctx.res.TargetRepo()
-		if len(a.pos) == 2 {
+		if len(a.pos) == 1 {
+			if target != nil {
+				pickGroupForRepo(ctx, target)
+				return 0
+			}
+			fmt.Println("用法: group set <仓库关键字> [分组名称]")
+			return 2
+		} else if len(a.pos) == 2 {
 			if target != nil {
 				grpName = a.pos[1]
+			} else if ctx.res != nil && ctx.res.NodeType == scope.NodeGroup && len(ctx.res.Scope.Segs) > 0 {
+				kw = a.pos[1]
+				grpName = ctx.res.Scope.Segs[len(ctx.res.Scope.Segs)-1].Ident
 			} else {
-				fmt.Println("用法: group set <仓库关键字> <分组名称>")
-				return 2
+				// 用户在全局敲了 group set <仓库名>，缺少分组名 -> 直接进入该仓库的选择菜单！
+				kw = a.pos[1]
+				r := pickTarget(ctx, "group set", kw)
+				if r == nil {
+					return 2
+				}
+				pickGroupForRepo(ctx, r)
+				return 0
 			}
 		} else if len(a.pos) >= 3 {
 			kw = a.pos[1]
 			grpName = a.pos[2]
-		} else {
-			fmt.Println("用法: group set [仓库] <分组名称>")
-			return 2
 		}
 		var r *state.Repo
 		if kw != "" {
@@ -1984,16 +2223,105 @@ func cmdGroup(ctx *appCtx, a args) int {
 		} else {
 			r = target
 		}
-		r.Group = strings.TrimSpace(grpName)
+		grpName = strings.TrimSpace(grpName)
+		if r.Group != "" && !strings.EqualFold(r.Group, grpName) && !a.has("yes", "y") {
+			if !confirmPrompt(ctx, fmt.Sprintf("仓库 %s 当前属于 [%s]，确认变更为 [%s]? [y/N] ", r.Name, r.Group, grpName)) {
+				fmt.Println("已取消。")
+				return 0
+			}
+		}
+		r.Group = grpName
 		r.ReviewedAt = time.Now().Format(time.RFC3339)
 		state.Canonicalize(r)
+		ctx.state.AddGroup(r.Group)
 		if err := ctx.state.Save(); err != nil {
 			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
 			return 1
 		}
+		refreshCurrentScope(ctx)
 		fmt.Printf("已将 %s 分组设置为: %s\n", r.Name, r.Group)
 		return 0
-	case "clear", "rm", "unset":
+
+	case "rm", "del", "delete":
+		// 分组作用域下：
+		if ctx.res != nil && ctx.res.NodeType == scope.NodeGroup && len(ctx.res.Scope.Segs) > 0 {
+			currentGroup := ctx.res.Scope.Segs[len(ctx.res.Scope.Segs)-1].Ident
+			if len(a.pos) == 1 {
+				pickRepoToRemoveFromGroup(ctx, currentGroup)
+				return 0
+			}
+			name := strings.TrimSpace(a.pos[1])
+			// 优先看是不是当前组内的仓库
+			var matchedRepo *state.Repo
+			for _, r := range ctx.state.Repos {
+				if strings.EqualFold(r.Group, currentGroup) && (strings.EqualFold(r.Name, name) || strings.EqualFold(r.ID, name)) {
+					matchedRepo = r
+					break
+				}
+			}
+			if matchedRepo != nil {
+				matchedRepo.Group = ""
+				matchedRepo.ReviewedAt = time.Now().Format(time.RFC3339)
+				state.Canonicalize(matchedRepo)
+				_ = ctx.state.Save()
+				refreshCurrentScope(ctx)
+				fmt.Printf("已将 %s 从分组 %s 移出。\n", matchedRepo.Name, currentGroup)
+				return 0
+			}
+			// 如果该名称是一个全局分组名：删除整个分组
+			if ctx.state.HasGroup(name) {
+				ctx.state.RemoveGroup(name)
+				_ = ctx.state.Save()
+				refreshCurrentScope(ctx)
+				fmt.Printf("已删除分组: %s\n", name)
+				return 0
+			}
+			fmt.Printf("未在当前分组或系统分组中找到: %s\n", name)
+			return 2
+		}
+
+		if len(a.pos) < 2 {
+			if target := ctx.res.TargetRepo(); target != nil {
+				target.Group = ""
+				target.ReviewedAt = time.Now().Format(time.RFC3339)
+				state.Canonicalize(target)
+				_ = ctx.state.Save()
+				refreshCurrentScope(ctx)
+				fmt.Printf("已清除 %s 的分组\n", target.Name)
+				return 0
+			}
+			fmt.Println("用法: group rm <分组名称或仓库关键字>")
+			return 2
+		}
+		grpName := strings.TrimSpace(a.pos[1])
+		if !ctx.state.HasGroup(grpName) {
+			if r := pickTarget(ctx, "group rm", grpName); r != nil {
+				r.Group = ""
+				r.ReviewedAt = time.Now().Format(time.RFC3339)
+				state.Canonicalize(r)
+				_ = ctx.state.Save()
+				refreshCurrentScope(ctx)
+				fmt.Printf("已清除 %s 的分组\n", r.Name)
+				return 0
+			}
+			fmt.Printf("未找到分组或仓库: %s\n", grpName)
+			return 2
+		}
+		ctx.state.RemoveGroup(grpName)
+		if err := ctx.state.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+			return 1
+		}
+		refreshCurrentScope(ctx)
+		fmt.Printf("已删除分组: %s\n", grpName)
+		return 0
+
+	case "clear", "unset":
+		if ctx.res != nil && ctx.res.NodeType == scope.NodeGroup && len(ctx.res.Scope.Segs) > 0 && len(a.pos) == 1 {
+			currentGroup := ctx.res.Scope.Segs[len(ctx.res.Scope.Segs)-1].Ident
+			pickRepoToRemoveFromGroup(ctx, currentGroup)
+			return 0
+		}
 		var kw string
 		target := ctx.res.TargetRepo()
 		if len(a.pos) >= 2 {
@@ -2018,23 +2346,42 @@ func cmdGroup(ctx *appCtx, a args) int {
 			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
 			return 1
 		}
+		refreshCurrentScope(ctx)
 		fmt.Printf("已清除 %s 的分组\n", r.Name)
 		return 0
+
 	default:
 		// 如果当前站在具体仓库上，允许直接输入 'group <组名>' 作为 set 的简写
 		if target := ctx.res.TargetRepo(); target != nil && len(a.pos) == 1 {
 			grpName := strings.TrimSpace(a.pos[0])
+			if target.Group != "" && !strings.EqualFold(target.Group, grpName) && !a.has("yes", "y") {
+				if !confirmPrompt(ctx, fmt.Sprintf("仓库 %s 当前属于 [%s]，确认变更为 [%s]? [y/N] ", target.Name, target.Group, grpName)) {
+					fmt.Println("已取消。")
+					return 0
+				}
+			}
 			target.Group = grpName
 			target.ReviewedAt = time.Now().Format(time.RFC3339)
 			state.Canonicalize(target)
+			ctx.state.AddGroup(target.Group)
 			if err := ctx.state.Save(); err != nil {
 				fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
 				return 1
 			}
+			refreshCurrentScope(ctx)
 			fmt.Printf("已将 %s 分组设置为: %s\n", target.Name, target.Group)
 			return 0
 		}
-		fmt.Printf("未知 group 子命令: %s (可选: list / new / set / clear)\n", sub)
+
+		arg := strings.TrimSpace(a.pos[0])
+		if ctx.state.HasGroup(arg) {
+			fmt.Printf("分组: %s（输入 'cd group:%s' 可进入该分组作用域，或 'group rm %s' 可删除该分组）\n", arg, arg, arg)
+			return 0
+		}
+		if r := pickTarget(ctx, "group", arg); r != nil {
+			pickGroupForRepo(ctx, r)
+			return 0
+		}
 		return 2
 	}
 }
@@ -2259,11 +2606,40 @@ func removeTag(r *state.Repo, tag string) []string {
 	return out
 }
 
-func confirm() bool {
+func readPrompt(ctx *appCtx, msg string) string {
+	if ctx != nil && ctx.rl != nil {
+		oldPrompt := prompt(ctx)
+		defer ctx.rl.SetPrompt(oldPrompt)
+		ctx.rl.SetPrompt(msg)
+		line, err := ctx.rl.Readline()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(line)
+	}
+	if ctx != nil && ctx.pipeScanner != nil {
+		fmt.Print(msg)
+		if !ctx.pipeScanner.Scan() {
+			return ""
+		}
+		return strings.TrimSpace(ctx.pipeScanner.Text())
+	}
+	fmt.Print(msg)
 	rd := bufio.NewReader(os.Stdin)
-	line, _ := rd.ReadString('\n')
-	line = strings.ToLower(strings.TrimSpace(line))
+	line, err := rd.ReadString('\n')
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(line)
+}
+
+func confirmPrompt(ctx *appCtx, msg string) bool {
+	line := strings.ToLower(readPrompt(ctx, msg))
 	return line == "y" || line == "yes"
+}
+
+func confirm() bool {
+	return confirmPrompt(nil, "")
 }
 
 // ---------------------------------------------------------------- 其它命令
@@ -2667,14 +3043,29 @@ func cmdPrune(ctx *appCtx, a args) int {
 func requireDirArg(ctx *appCtx, a args, verb string) (string, bool) {
 	if len(a.pos) == 0 {
 		fmt.Printf("用法: igit %s <目录>\n", verb)
-		fmt.Println("  绝对路径，或相对当前作用域的目录名")
+		fmt.Println("  绝对路径，或相对当前作用域的目录名（在当前仓库/目录下可直接用 '.'）")
 		return "", false
 	}
 	raw := strings.Trim(strings.TrimSpace(a.pos[0]), `"`)
+	if raw == "." {
+		if ctx != nil && ctx.res != nil {
+			if target := ctx.res.TargetRepo(); target != nil {
+				return filepath.Clean(target.Path), true
+			}
+			if base := ctx.res.Scope.BaseDir(); base != "" {
+				return filepath.Clean(base), true
+			}
+		}
+		fmt.Printf("当前作用域是集合/全集（非具体目录或仓库），'.' 无法确定目标。请指定具体目录路径。\n")
+		return "", false
+	}
 	if filepath.IsAbs(raw) {
 		return filepath.Clean(raw), true
 	}
-	if ctx.res != nil {
+	if ctx != nil && ctx.res != nil {
+		if target := ctx.res.TargetRepo(); target != nil {
+			return filepath.Join(target.Path, raw), true
+		}
 		if base := ctx.res.Scope.BaseDir(); base != "" {
 			return filepath.Join(base, raw), true
 		}
@@ -2687,6 +3078,19 @@ func requireDirArg(ctx *appCtx, a args, verb string) (string, bool) {
 		return "", false
 	}
 	return abs, true
+}
+
+func shouldStepUp(res *scope.Resolved, dir string) bool {
+	if res == nil {
+		return false
+	}
+	if target := res.TargetRepo(); target != nil {
+		return util.HasPrefixPath(target.Path, dir)
+	}
+	if base := res.Scope.BaseDir(); base != "" {
+		return util.HasPrefixPath(base, dir)
+	}
+	return false
 }
 
 // suggestSubdirs 列出 dir 这一层有哪些子目录，路径写错时好有个对照。
@@ -2750,6 +3154,13 @@ func cmdHide(ctx *appCtx, a args, hide bool) int {
 	if hide && !guardEmptyRule(ctx, dir, verb) {
 		return 2
 	}
+	if hide && !a.has("yes", "y") {
+		cnt := affectedCount(ctx.state, dir)
+		if !confirmPrompt(ctx, fmt.Sprintf("确认隐藏 %s（包含 %d 个仓库）? [y/N] ", dir, cnt)) {
+			fmt.Println("已取消。")
+			return 0
+		}
+	}
 	var changed bool
 	if hide {
 		dir, changed = ctx.state.Hide(dir, a.str("", "note"))
@@ -2767,9 +3178,22 @@ func cmdHide(ctx *appCtx, a args, hide bool) int {
 	if hide {
 		fmt.Printf("已隐藏 %s\n", dir)
 		fmt.Printf("  该目录下 %d 个仓库不再出现在任何结果里，扫描也会整棵跳过。\n", affectedCount(ctx.state, dir))
+		if ctx.repl && ctx.res != nil && shouldStepUp(ctx.res, dir) {
+			sc := ctx.res.Scope.Parent()
+			for !sc.IsRoot() {
+				if _, err := scope.Resolve(sc, ctx.state); err == nil {
+					break
+				}
+				sc = sc.Parent()
+			}
+			setScope(ctx, sc)
+		} else {
+			refreshCurrentScope(ctx)
+		}
 	} else {
 		fmt.Printf("已取消隐藏 %s\n", dir)
 		fmt.Printf("  该目录下 %d 个仓库恢复显示（下次 scan 才会重新采集）。\n", affectedCount(ctx.state, dir))
+		refreshCurrentScope(ctx)
 	}
 	return 0
 }
@@ -2785,6 +3209,13 @@ func cmdFold(ctx *appCtx, a args, fold bool) int {
 	}
 	if fold && !guardEmptyRule(ctx, dir, verb) {
 		return 2
+	}
+	if fold && !a.has("yes", "y") {
+		cnt := affectedCount(ctx.state, dir)
+		if !confirmPrompt(ctx, fmt.Sprintf("确认折叠 %s（包含 %d 个仓库）? [y/N] ", dir, cnt)) {
+			fmt.Println("已取消。")
+			return 0
+		}
 	}
 	var changed bool
 	if fold {
@@ -2806,6 +3237,7 @@ func cmdFold(ctx *appCtx, a args, fold bool) int {
 	} else {
 		fmt.Printf("已展开 %s\n", dir)
 	}
+	refreshCurrentScope(ctx)
 	return 0
 }
 

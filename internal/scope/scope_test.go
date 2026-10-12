@@ -303,3 +303,48 @@ func TestTrailAndNodeType(t *testing.T) {
 		t.Fatalf("TargetRepo() 错误: %+v", resRepo.TargetRepo())
 	}
 }
+
+func TestEmptyGroupScope(t *testing.T) {
+	st := fixture()
+	if !st.AddGroup("study") {
+		t.Fatal("AddGroup(study) 失败")
+	}
+
+	// 1. 根节点下应能看到空分组 study，且数量为 0
+	rootSc := mustParse(t, "")
+	resRoot, err := Resolve(rootSc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, it := range resRoot.Children {
+		if it.Facet == DimGroup && it.Label == "group:study" {
+			found = true
+			if it.Count != 0 {
+				t.Fatalf("期望 study 分组数量为 0，实际 %d", it.Count)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("根节点子项未包含新创建的空分组 group:study")
+	}
+
+	// 2. 能够正常进入空分组作用域
+	studySc := mustParse(t, "group:study")
+	resStudy, err := Resolve(studySc, st)
+	if err != nil {
+		t.Fatalf("进入空分组失败: %v", err)
+	}
+	if resStudy.NodeType != NodeGroup {
+		t.Fatalf("NodeType 期望 %v，实际 %v", NodeGroup, resStudy.NodeType)
+	}
+	if len(resStudy.Repos) != 0 || resStudy.Totals.Repos != 0 {
+		t.Fatalf("空分组仓库数量应为 0，实际 %d", resStudy.Totals.Repos)
+	}
+
+	// 3. 不存在的分组应当报错
+	badSc := mustParse(t, "group:ghost")
+	if _, err := Resolve(badSc, st); err == nil {
+		t.Fatal("不存在的分组应当返回错误，但实际没有报错")
+	}
+}

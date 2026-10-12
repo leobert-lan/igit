@@ -97,6 +97,9 @@ type State struct {
 	// Folded：折叠。知道这里有一堆仓库，但不展开细节，只显示汇总。
 	Folded []DirRule `json:"folded,omitempty"`
 
+	// Groups: 显式定义的分组列表（允许空分组存在）
+	Groups []string `json:"groups,omitempty"`
+
 	path string `json:"-"`
 }
 
@@ -171,6 +174,84 @@ func (s *State) IsFolded(p string) string {
 		}
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------- 分组管理
+
+// AllGroups 返回所有已知分组（显式创建的空分组 + 已分配给仓库的分组），去重并排序。
+func (s *State) AllGroups() []string {
+	m := map[string]string{}
+	for _, g := range s.Groups {
+		trimmed := strings.TrimSpace(g)
+		if trimmed != "" {
+			m[strings.ToLower(trimmed)] = trimmed
+		}
+	}
+	for _, r := range s.Repos {
+		trimmed := strings.TrimSpace(r.Group)
+		if trimmed != "" {
+			lower := strings.ToLower(trimmed)
+			if _, ok := m[lower]; !ok {
+				m[lower] = trimmed
+			}
+		}
+	}
+	out := make([]string, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// HasGroup 检查是否存在指定分组（不区分大小写）。
+func (s *State) HasGroup(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, g := range s.AllGroups() {
+		if strings.EqualFold(g, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// AddGroup 显式记录一个新分组。若已存在返回 false。
+func (s *State) AddGroup(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || s.HasGroup(name) {
+		return false
+	}
+	s.Groups = append(s.Groups, name)
+	sort.Strings(s.Groups)
+	return true
+}
+
+// RemoveGroup 删除分组定义。若有仓库属于该组，解除其关联。
+func (s *State) RemoveGroup(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	found := false
+	newGroups := make([]string, 0, len(s.Groups))
+	for _, g := range s.Groups {
+		if strings.EqualFold(g, name) {
+			found = true
+			continue
+		}
+		newGroups = append(newGroups, g)
+	}
+	s.Groups = newGroups
+	for _, r := range s.Repos {
+		if strings.EqualFold(r.Group, name) {
+			r.Group = ""
+			found = true
+		}
+	}
+	return found
 }
 
 // Load 读取状态文件，不存在返回空状态。

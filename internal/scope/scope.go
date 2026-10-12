@@ -372,6 +372,12 @@ func Resolve(sc Scope, st *state.State) (*Resolved, error) {
 			next = append(next, hit)
 		}
 		if len(next) == 0 {
+			if g.Dim == DimGroup && st != nil && st.HasGroup(g.Ident) {
+				cur = next
+				last = g
+				have = true
+				continue
+			}
 			return nil, fmt.Errorf("%s 没有匹配到任何仓库", g.Dim+":"+g.Ident)
 		}
 		cur = next
@@ -425,7 +431,7 @@ func Resolve(sc Scope, st *state.State) (*Resolved, error) {
 
 	res := &Resolved{Scope: sc, Kind: kind, NodeType: nodeType, Repos: cur, Self: self, Freshness: Freshness(st)}
 	res.Totals = totalsOf(cur)
-	res.Children = childrenOf(sc, cur, Visible(st), kind)
+	res.Children = childrenOf(sc, cur, Visible(st), kind, st)
 	return res, nil
 }
 
@@ -551,10 +557,10 @@ func Freshness(st *state.State) string {
 
 // ---------------------------------------------------------------- 子项
 
-func childrenOf(sc Scope, repos []*state.Repo, all []*state.Repo, kind string) []Item {
+func childrenOf(sc Scope, repos []*state.Repo, all []*state.Repo, kind string, st *state.State) []Item {
 	switch kind {
 	case KindRoot:
-		return rootChildren(repos)
+		return rootChildren(st, repos)
 	case KindRepo:
 		if len(repos) == 1 {
 			return nestedChildren(sc, all, repos[0].Path)
@@ -584,10 +590,10 @@ func nestedChildren(sc Scope, all []*state.Repo, parentPath string) []Item {
 }
 
 // rootChildren 列出三个维度入口，各带数量。
-func rootChildren(repos []*state.Repo) []Item {
+func rootChildren(st *state.State, repos []*state.Repo) []Item {
 	out := make([]Item, 0, 16)
 	out = append(out, facetItems(DimFile, "按目录", dirFacet(repos))...)
-	out = append(out, facetItems(DimGroup, "按分组", groupFacet(repos))...)
+	out = append(out, facetItems(DimGroup, "按分组", groupFacet(st, repos))...)
 	out = append(out, facetItems(DimTag, "按标签", tagFacet(repos))...)
 	return out
 }
@@ -622,20 +628,29 @@ func dirFacet(repos []*state.Repo) []facet {
 	return sortedFacets(m)
 }
 
-func groupFacet(repos []*state.Repo) []facet {
+func groupFacet(st *state.State, repos []*state.Repo) []facet {
 	m := map[string]int{}
+	if st != nil {
+		for _, g := range st.AllGroups() {
+			m[g] = 0
+		}
+	}
 	for _, r := range repos {
 		if r.Group == "" {
 			continue
 		}
 		fold := r.Group
+		found := false
 		for k := range m {
 			if strings.EqualFold(k, r.Group) {
-				fold = k
+				m[k]++
+				found = true
 				break
 			}
 		}
-		m[fold]++
+		if !found {
+			m[fold] = 1
+		}
 	}
 	return sortedFacets(m)
 }
