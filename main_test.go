@@ -534,4 +534,84 @@ func TestCmdGroupInGroupScope(t *testing.T) {
 	}
 }
 
+func TestAggregateByTags(t *testing.T) {
+	repos := []*state.Repo{
+		{Name: "r1", Tags: []string{"client-bsi", "rust", "sdk"}},
+		{Name: "r2", Tags: []string{"client-bsi", "rust", "cli"}},
+		{Name: "r3", Tags: []string{"client-bsi", "flutter"}},
+		{Name: "r4", Tags: []string{"tools", "python"}},
+	}
+
+	// 1. 无标签过滤时，包含全部 4 个仓库，统计全部伴生标签
+	matched, facets := aggregateByTags(repos, nil)
+	if len(matched) != 4 {
+		t.Fatalf("全量命中应为 4, 实际: %d", len(matched))
+	}
+	// client-bsi 出现 3 次，应排第一
+	if len(facets) == 0 || facets[0].Name != "client-bsi" || facets[0].Count != 3 {
+		t.Fatalf("第一个伴生标签应为 client-bsi (3), 实际: %+v", facets)
+	}
+
+	// 2. 选择 client-bsi 后，命中 3 个，伴生标签排除 client-bsi
+	matched, facets = aggregateByTags(repos, []string{"client-bsi"})
+	if len(matched) != 3 {
+		t.Fatalf("client-bsi 命中应为 3, 实际: %d", len(matched))
+	}
+	// rust 出现 2 次，排第一
+	if facets[0].Name != "rust" || facets[0].Count != 2 {
+		t.Fatalf("伴生标签应为 rust (2), 实际: %+v", facets[0])
+	}
+
+	// 3. 选择 client-bsi + rust 后，命中 2 个 (r1, r2)
+	matched, facets = aggregateByTags(repos, []string{"client-bsi", "rust"})
+	if len(matched) != 2 {
+		t.Fatalf("client-bsi + rust 命中应为 2, 实际: %d", len(matched))
+	}
+}
+
+func TestCmdLsByTagInteractiveFacetedFlow(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p1 := filepath.Join(tmpDir, "repo-algo")
+	p2 := filepath.Join(tmpDir, "repo-core")
+	p3 := filepath.Join(tmpDir, "repo-ui")
+	r1 := &state.Repo{ID: util.NormalizePath(p1), Path: p1, Name: "repo-algo", Tags: []string{"client-bsi", "rust", "sdk"}, Kind: "repo"}
+	r2 := &state.Repo{ID: util.NormalizePath(p2), Path: p2, Name: "repo-core", Tags: []string{"client-bsi", "rust", "cli"}, Kind: "repo"}
+	r3 := &state.Repo{ID: util.NormalizePath(p3), Path: p3, Name: "repo-ui", Tags: []string{"client-bsi", "flutter"}, Kind: "repo"}
+	st.Repos = append(st.Repos, r1, r2, r3)
+	_ = st.Save()
+
+	res, err := scope.Resolve(scope.Scope{Source: scope.SourceRoot}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 模拟交互输入流：
+	// 1. 输入 "1" (选择第一个推荐伴生标签 client-bsi，当前全集 3 个仓都有)
+	// 2. 输入 "1" (在 client-bsi 的伴生推荐中选择 rust，剩下 2 个仓 repo-algo 和 repo-core)
+	// 3. 输入 "#2" (直达进入第二个命中仓库 repo-core)
+	inputSequence := "1\n1\n#2\n"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader(inputSequence))
+
+	code := cmdLsByTag(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("cmdLsByTag 退出码错误: %d", code)
+	}
+
+	// 验证成功进入目标仓库 repo-core
+	if ctx.res == nil || ctx.res.TargetRepo() == nil {
+		t.Fatal("未成功切换至目标单仓作用域")
+	}
+	if ctx.res.TargetRepo().Name != "repo-core" {
+		t.Fatalf("期望进入 repo-core, 实际进入: %s", ctx.res.TargetRepo().Name)
+	}
+}
+
+
 

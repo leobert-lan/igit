@@ -256,8 +256,23 @@ var commandHelps = map[string]string{
 
 用法:
   tag list             列出所有标签及使用频次
+  tag filter [标签]    进入响应式标签漏斗检索 (同 lsbytag)
   tag add <标签>       为当前仓库打上标签 (单仓作用域下)
   tag rm <标签>        移除当前仓库的指定标签`,
+
+	"lsbytag": `igit lsbytag - 响应式多维标签漏斗检索与就地导航
+
+用法:
+  lsbytag [初始标签...] 进入响应式多维标签漏斗检索交互
+
+交互指令:
+  <编号/标签名>        追加伴生标签，实时收缩交集
+  -<标签名> / pop      移除已选标签，空间动态回弹
+  clear                清空所有已选标签，重置回初始全量
+  #<序号>              直达并进入该目标仓库作用域
+  q / quit             退出检索并保持当前作用域`,
+
+	"ls-by-tag": `igit lsbytag - 响应式多维标签漏斗检索与就地导航 (同 lsbytag)`,
 
 	"status": `igit status - 查看或修改仓库状态
 

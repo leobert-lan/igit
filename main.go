@@ -159,6 +159,8 @@ func dispatch(ctx *appCtx, cmd string, a args) int {
 		return cmdGroup(ctx, a)
 	case "tag":
 		return cmdTag(ctx, a)
+	case "lsbytag", "ls-by-tag":
+		return cmdLsByTag(ctx, a)
 	case "status":
 		return cmdStatus(ctx, a)
 	case "note":
@@ -317,12 +319,14 @@ func candidates(ctx *appCtx, head, word string) []string {
 		}
 	case "tag":
 		if len(fields) == 1 && endsSpace || (len(fields) == 2 && !endsSpace) {
-			subc := []string{"list", "add", "rm"}
+			subc := []string{"list", "add", "rm", "filter", "find"}
 			return matchPrefix(subc, word)
 		}
 		if len(fields) >= 2 {
 			return matchPrefix(allTagNames(ctx), word)
 		}
+	case "lsbytag", "ls-by-tag":
+		return matchPrefix(allTagNames(ctx), word)
 	case "status":
 		return matchPrefix([]string{"new", "active", "done", "archived", "待处理", "跟进中", "已处理", "已归档"}, word)
 	case "help":
@@ -413,7 +417,7 @@ func driveTargets(prefix string) []string {
 // commandsFor 这个界面上能敲的命令。功能集由界面定义，所以 Tab 补出来的
 // 就是此刻真正可用的那几个 —— 顺带把"这个界面能做什么"摆明了。
 func commandsFor(ctx *appCtx) []string {
-	common := []string{"cd", "pwd", "help", "exit", "quit", "group", "tag", "config"}
+	common := []string{"cd", "pwd", "help", "exit", "quit", "group", "tag", "config", "lsbytag"}
 	res := ctx.res
 	if res == nil {
 		return append(common, "ls", "list", "scan")
@@ -991,6 +995,7 @@ func availableActions(res *scope.Resolved) []action {
 		return []action{
 			{"ls", "看维度入口：按目录 / 按分组 / 按标签"},
 			{"list", "列出仓库（默认只看待处理）"},
+			{"lsbytag", "响应式标签漏斗检索与就地导航"},
 			{"tree", "看全局目录分布树"},
 			{"stats", "查看全局聚合统计"},
 			{"cd <目标>", "走进某个目录、标签或分组"},
@@ -1003,6 +1008,7 @@ func availableActions(res *scope.Resolved) []action {
 		acts := []action{
 			{"ls", "看这批的详细清单与子项"},
 			{"list", "按表格看这批"},
+			{"lsbytag", "响应式标签漏斗检索与就地导航"},
 			{"tree", "看这批的空间分布树"},
 			{"stats", "看这批的汇总统计"},
 			{"cd <子项>", "进入子目录或仓库"},
@@ -2487,9 +2493,280 @@ func cmdTag(ctx *appCtx, a args) int {
 		}
 		fmt.Printf("已更新 %s 标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
 		return 0
+	case "filter", "find":
+		subArgs := a
+		if len(subArgs.pos) > 0 {
+			subArgs.pos = subArgs.pos[1:]
+		}
+		return cmdLsByTag(ctx, subArgs)
 	default:
-		fmt.Printf("未知 tag 子命令: %s (可选: list / add / rm)\n", sub)
+		fmt.Printf("未知 tag 子命令: %s (可选: list / add / rm / filter / find)\n", sub)
 		return 2
+	}
+}
+
+// TagFacet 伴生标签及当前出现频次。
+type TagFacet struct {
+	Name  string
+	Count int
+}
+
+// aggregateByTags 计算当前包含所有 activeTags 的仓库集，并聚合剩余伴生标签及其出现频次。
+func aggregateByTags(pool []*state.Repo, activeTags []string) ([]*state.Repo, []TagFacet) {
+	var matched []*state.Repo
+	for _, r := range pool {
+		hasAll := true
+		for _, at := range activeTags {
+			if !hasTag(r, at) {
+				hasAll = false
+				break
+			}
+		}
+		if hasAll {
+			matched = append(matched, r)
+		}
+	}
+
+	activeMap := make(map[string]bool)
+	for _, at := range activeTags {
+		activeMap[strings.ToLower(at)] = true
+	}
+
+	freq := make(map[string]int)
+	for _, r := range matched {
+		for _, t := range r.Tags {
+			tl := strings.TrimSpace(t)
+			if tl == "" || activeMap[strings.ToLower(tl)] {
+				continue
+			}
+			freq[tl]++
+		}
+	}
+
+	var facets []TagFacet
+	for name, count := range freq {
+		facets = append(facets, TagFacet{Name: name, Count: count})
+	}
+	sort.Slice(facets, func(i, j int) bool {
+		if facets[i].Count != facets[j].Count {
+			return facets[i].Count > facets[j].Count
+		}
+		return facets[i].Name < facets[j].Name
+	})
+
+	return matched, facets
+}
+
+func enterRepo(ctx *appCtx, targetRepo *state.Repo) int {
+	fmt.Printf("\n-> 正在进入仓库: %s (%s)\n", targetRepo.Name, targetRepo.Path)
+	sc, err := scope.Parse("file:" + targetRepo.Path)
+	if err != nil {
+		fmt.Printf("解析仓库作用域失败: %v\n", err)
+		return 1
+	}
+	if ctx.repl {
+		return setScope(ctx, sc)
+	}
+	res, err := scope.Resolve(sc, ctx.state)
+	if err != nil {
+		return 1
+	}
+	printScopeHead(res)
+	return 0
+}
+
+// cmdLsByTag 响应式多维标签漏斗检索与就地导航。
+// @design docs/ANALYSIS-tag-workflow.md#3-lsbytag-响应式多维漏斗交互模型
+func cmdLsByTag(ctx *appCtx, a args) int {
+	pool := scopeRepos(ctx)
+	if pool == nil {
+		pool = scope.Visible(ctx.state)
+	}
+	if len(pool) == 0 {
+		fmt.Println("当前作用域或全集下没有可见仓库。")
+		return 0
+	}
+
+	var activeTags []string
+	for _, p := range a.pos {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			activeTags = append(activeTags, p)
+		}
+	}
+
+	for {
+		matched, facets := aggregateByTags(pool, activeTags)
+
+		fmt.Println()
+		fmt.Println("==================== 响应式标签漏斗检索 (lsByTag) ====================")
+		if len(activeTags) == 0 {
+			fmt.Printf("[已选标签]: (暂无，显示当前全部 %d 个仓库)\n", len(matched))
+		} else {
+			tagListStr := strings.Join(activeTags, "] + [")
+			fmt.Printf("[已选标签]: [%s]  (当前空间收敛至 %d 个仓库)\n", tagListStr, len(matched))
+		}
+
+		if len(facets) > 0 {
+			fmt.Println("\n[伴生推荐标签]:")
+			displayCount := len(facets)
+			if displayCount > 15 {
+				displayCount = 15
+			}
+			col := 0
+			line := "  "
+			for i := 0; i < displayCount; i++ {
+				item := fmt.Sprintf("%2d) %s (%d)", i+1, facets[i].Name, facets[i].Count)
+				line += util.PadRightDisplay(item, 24)
+				col++
+				if col >= 3 {
+					fmt.Println(line)
+					line = "  "
+					col = 0
+				}
+			}
+			if col > 0 {
+				fmt.Println(line)
+			}
+			if len(facets) > displayCount {
+				fmt.Printf("      ... 还有 %d 个标签未列出\n", len(facets)-displayCount)
+			}
+		} else if len(activeTags) > 0 {
+			fmt.Println("\n[伴生推荐标签]: (已无更多伴生标签)")
+		}
+
+		fmt.Printf("\n[命中仓库清单] (共 %d 个):\n", len(matched))
+		if len(matched) == 0 {
+			fmt.Println("  (无匹配仓库，请尝试移除或修改已选标签)")
+		} else {
+			maxShow := 10
+			if len(matched) <= 15 {
+				maxShow = len(matched)
+			}
+			for i := 0; i < maxShow; i++ {
+				r := matched[i]
+				tagStr := ""
+				if len(r.Tags) > 0 {
+					tagStr = fmt.Sprintf(" [%s]", strings.Join(r.Tags, ", "))
+				}
+				grpStr := ""
+				if r.Group != "" {
+					grpStr = fmt.Sprintf(" (%s)", r.Group)
+				}
+				fmt.Printf("  #%-2d %s%s%s\n", i+1, util.PadRightDisplay(r.Name, 20), grpStr, tagStr)
+			}
+			if len(matched) > maxShow {
+				fmt.Printf("      ... 还有 %d 个仓库未展开\n", len(matched)-maxShow)
+			}
+		}
+
+		fmt.Println("\n操作提示:")
+		fmt.Println("  输入数字编号或标签名: 追加标签收缩范围")
+		fmt.Println("  输入 -<标签名> 或 pop: 移除标签回弹范围 | clear: 清空所有标签")
+		if len(matched) > 0 {
+			fmt.Println("  输入 #<编号> (如 #1): 直达进入该仓库作用域")
+		}
+		fmt.Println("  输入 q 或 quit: 退出检索")
+		fmt.Println()
+
+		input, ok := readPromptLine(ctx, "lsByTag> ")
+		if !ok {
+			fmt.Println("已退出标签检索。")
+			return 0
+		}
+		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		}
+		if strings.EqualFold(input, "q") || strings.EqualFold(input, "quit") || strings.EqualFold(input, "exit") {
+			fmt.Println("已退出标签检索。")
+			return 0
+		}
+		if strings.EqualFold(input, "clear") || strings.EqualFold(input, "reset") {
+			activeTags = nil
+			continue
+		}
+		if strings.EqualFold(input, "pop") || strings.EqualFold(input, "back") {
+			if len(activeTags) > 0 {
+				activeTags = activeTags[:len(activeTags)-1]
+			} else {
+				fmt.Println("当前尚未选择任何标签。")
+			}
+			continue
+		}
+		if strings.HasPrefix(input, "-") {
+			toRm := strings.TrimSpace(strings.TrimPrefix(input, "-"))
+			found := false
+			var remaining []string
+			for _, at := range activeTags {
+				if strings.EqualFold(at, toRm) {
+					found = true
+				} else {
+					remaining = append(remaining, at)
+				}
+			}
+			if found {
+				activeTags = remaining
+			} else {
+				fmt.Printf("已选标签中未包含: %s\n", toRm)
+			}
+			continue
+		}
+
+		// 检查是否输入 #<数字> 直达仓库
+		if strings.HasPrefix(input, "#") {
+			idxStr := strings.TrimSpace(strings.TrimPrefix(input, "#"))
+			idx, err := strconv.Atoi(idxStr)
+			if err == nil && idx >= 1 && idx <= len(matched) {
+				targetRepo := matched[idx-1]
+				return enterRepo(ctx, targetRepo)
+			}
+			fmt.Printf("无效的仓库编号: %s\n", input)
+			continue
+		}
+
+		// 检查是否纯数字:
+		// 优先作为伴生标签编号;
+		// 若当前已无伴生标签 (facets 为空) 或数字大于伴生标签且落在 matched 范围内，作为仓库编号
+		num, err := strconv.Atoi(input)
+		if err == nil {
+			if num >= 1 && num <= len(facets) {
+				activeTags = append(activeTags, facets[num-1].Name)
+				continue
+			}
+			if (len(facets) == 0 || num > len(facets)) && num >= 1 && num <= len(matched) {
+				targetRepo := matched[num-1]
+				return enterRepo(ctx, targetRepo)
+			}
+			fmt.Printf("无效的编号: %d\n", num)
+			continue
+		}
+
+		// 检查是否匹配仓库名
+		var hitRepo *state.Repo
+		for _, r := range matched {
+			if strings.EqualFold(r.Name, input) {
+				hitRepo = r
+				break
+			}
+		}
+		if hitRepo != nil && len(matched) <= 5 {
+			return enterRepo(ctx, hitRepo)
+		}
+
+		// 否则作为标签名追加
+		already := false
+		for _, at := range activeTags {
+			if strings.EqualFold(at, input) {
+				already = true
+				break
+			}
+		}
+		if already {
+			fmt.Printf("标签 [%s] 已在过滤条件中。\n", input)
+			continue
+		}
+		activeTags = append(activeTags, input)
 	}
 }
 
@@ -2606,31 +2883,36 @@ func removeTag(r *state.Repo, tag string) []string {
 	return out
 }
 
-func readPrompt(ctx *appCtx, msg string) string {
+func readPromptLine(ctx *appCtx, msg string) (string, bool) {
 	if ctx != nil && ctx.rl != nil {
 		oldPrompt := prompt(ctx)
 		defer ctx.rl.SetPrompt(oldPrompt)
 		ctx.rl.SetPrompt(msg)
 		line, err := ctx.rl.Readline()
 		if err != nil {
-			return ""
+			return "", false
 		}
-		return strings.TrimSpace(line)
+		return strings.TrimSpace(line), true
 	}
 	if ctx != nil && ctx.pipeScanner != nil {
 		fmt.Print(msg)
 		if !ctx.pipeScanner.Scan() {
-			return ""
+			return "", false
 		}
-		return strings.TrimSpace(ctx.pipeScanner.Text())
+		return strings.TrimSpace(ctx.pipeScanner.Text()), true
 	}
 	fmt.Print(msg)
 	rd := bufio.NewReader(os.Stdin)
 	line, err := rd.ReadString('\n')
-	if err != nil {
-		return ""
+	if err != nil && len(line) == 0 {
+		return "", false
 	}
-	return strings.TrimSpace(line)
+	return strings.TrimSpace(line), true
+}
+
+func readPrompt(ctx *appCtx, msg string) string {
+	line, _ := readPromptLine(ctx, msg)
+	return line
 }
 
 func confirmPrompt(ctx *appCtx, msg string) bool {
