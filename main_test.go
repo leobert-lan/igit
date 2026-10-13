@@ -613,5 +613,134 @@ func TestCmdLsByTagInteractiveFacetedFlow(t *testing.T) {
 	}
 }
 
+func TestCleanTagInput(t *testing.T) {
+	// 1. ANSI 方向键与删除键转义序列过滤
+	dirtyArrow := "tag\x1b[D\x1b[Cname"
+	if got := cleanTagInput(dirtyArrow); got != "tagname" {
+		t.Fatalf("ANSI 方向键清理失败: %q", got)
+	}
+
+	dirtyDelete := "foo\x1b[3~bar"
+	if got := cleanTagInput(dirtyDelete); got != "foobar" {
+		t.Fatalf("ANSI 删除键清理失败: %q", got)
+	}
+
+	// 2. 模拟终端退格与 DEL 键
+	dirtyBS := "helpp\b"
+	if got := cleanTagInput(dirtyBS); got != "help" {
+		t.Fatalf("退格键模拟失败: %q", got)
+	}
+
+	// 3. 不可见控制字符过滤
+	dirtyNull := "  hello\x00world  "
+	if got := cleanTagInput(dirtyNull); got != "helloworld" {
+		t.Fatalf("NULL 字符过滤失败: %q", got)
+	}
+}
+
+func TestCmdTagInRepoScope(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repoPath := filepath.Join(tmpDir, "AgyArchiveHelper")
+	repo := &state.Repo{ID: util.NormalizePath(repoPath), Path: repoPath, Name: "AgyArchiveHelper", Kind: "repo"}
+	st.Repos = append(st.Repos, repo)
+	_ = st.Save()
+
+	sc, err := scope.Parse("file:" + repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 1. 系统中无任何标签时，单仓下输入 tag，提示并输入 "+" 新建 "backup, helper"
+	inputSeq1 := "+\nbackup, helper\n"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader(inputSeq1))
+	code := cmdTag(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("cmdTag 无标签下创建失败: code %d", code)
+	}
+	if len(repo.Tags) != 2 || repo.Tags[0] != "backup" || repo.Tags[1] != "helper" {
+		t.Fatalf("标签创建未生效: %+v", repo.Tags)
+	}
+
+	// 2. 系统中已有标签时，输入 tag 弹出复选列表，输入 "1" 取消 backup，再输入 "q" 退出
+	inputSeq2 := "1\nq\n"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader(inputSeq2))
+	code = cmdTag(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("cmdTag 复选切换失败: code %d", code)
+	}
+	if len(repo.Tags) != 1 || repo.Tags[0] != "helper" {
+		t.Fatalf("取消 backup 勾选失败: %+v", repo.Tags)
+	}
+
+	// 3. 单仓下快捷追加标签 tag rust
+	code = cmdTag(ctx, parseArgs([]string{"rust"}))
+	if code != 0 {
+		t.Fatalf("快捷打标失败: code %d", code)
+	}
+	if !hasTag(repo, "rust") || !hasTag(repo, "helper") {
+		t.Fatalf("快捷打标未保留原有标签: %+v", repo.Tags)
+	}
+
+	// 4. 单仓下清空标签 tag clear
+	code = cmdTag(ctx, parseArgs([]string{"clear"}))
+	if code != 0 {
+		t.Fatalf("清空标签失败: code %d", code)
+	}
+	if len(repo.Tags) != 0 {
+		t.Fatalf("清空标签未生效: %+v", repo.Tags)
+	}
+}
+
+func TestCmdTagInTagScope(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p1 := filepath.Join(tmpDir, "r1")
+	p2 := filepath.Join(tmpDir, "r2")
+	r1 := &state.Repo{ID: util.NormalizePath(p1), Path: p1, Name: "r1", Tags: []string{"rust"}, Kind: "repo"}
+	r2 := &state.Repo{ID: util.NormalizePath(p2), Path: p2, Name: "r2", Tags: []string{"rust"}, Kind: "repo"}
+	st.Repos = append(st.Repos, r1, r2)
+	_ = st.Save()
+
+	sc, err := scope.Parse("tag:rust")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 在 tag:rust 作用域下输入 tag rm，弹出当前拥有 rust 的仓库列表，输入 1 移除 r1 的 rust 标签
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("1\n"))
+	code := cmdTag(ctx, parseArgs([]string{"rm"}))
+	if code != 0 {
+		t.Fatalf("tag rm 在标签作用域执行失败: %d", code)
+	}
+	if hasTag(r1, "rust") {
+		t.Fatal("r1 的 rust 标签未被移除")
+	}
+	if !hasTag(r2, "rust") {
+		t.Fatal("r2 的 rust 标签不应被移除")
+	}
+}
+
+
 
 

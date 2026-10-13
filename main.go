@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -2392,6 +2393,303 @@ func cmdGroup(ctx *appCtx, a args) int {
 	}
 }
 
+var ansiEscapeRegex = regexp.MustCompile(`(?:\x1b|\^\[)(?:\[[0-9;?]*[ -/]*[@-~]|O[A-Za-z0-9]|.)`)
+
+// cleanTerminalInput 清理终端输入，去除 ANSI 转义序列、模拟处理退格/DEL 并剔除不可见控制字符，
+// 杜绝因终端按下方向键 (如 \x1b[A-\x1b[D)、删除键 (\x1b[3~) 或退格产生字符污染/乱码。
+func cleanTerminalInput(raw string) string {
+	// 1. 去除 ANSI 转义序列 (如方向键 \x1b[A-\x1b[D、删除键 \x1b[3~、^[[ 等)
+	cleaned := ansiEscapeRegex.ReplaceAllString(raw, "")
+
+	// 2. 模拟处理退格键 (\b 和 \x7f)
+	var runes []rune
+	for _, r := range cleaned {
+		if r == '\b' || r == 127 {
+			if len(runes) > 0 {
+				runes = runes[:len(runes)-1]
+			}
+		} else if r >= 32 || r == '\t' || r == '\n' {
+			runes = append(runes, r)
+		}
+	}
+	return strings.TrimSpace(string(runes))
+}
+
+// cleanTagInput 清理标签输入，复用终端清理逻辑
+func cleanTagInput(raw string) string {
+	return cleanTerminalInput(raw)
+}
+
+// printAllTagsWithHints 列出全盘所有标签及使用量，附带操作引导提示。
+func printAllTagsWithHints(ctx *appCtx) int {
+	tags := map[string]int{}
+	for _, r := range ctx.state.Repos {
+		for _, t := range r.Tags {
+			tags[t]++
+		}
+	}
+	if len(tags) == 0 {
+		fmt.Println("当前全集尚未创建任何标签。可用 'tag add <标签名>' 给仓库打标签。")
+		return 0
+	}
+	fmt.Println("现有标签:")
+	keys := util.SortedKeys(tags)
+	for _, k := range keys {
+		fmt.Printf("  %-20s %d 个仓库\n", k, tags[k])
+	}
+	fmt.Println("\n提示:")
+	fmt.Println("  在单仓下输入 'tag' 可就地按编号复选/新建标签;")
+	fmt.Println("  在全集下输入 'tag <仓库名>' 可为指定仓库编辑标签;")
+	fmt.Println("  输入 'lsbytag' 可进入响应式多维标签漏斗检索。")
+	return 0
+}
+
+// pickTagForRepo 为指定仓库交互式管理标签（支持复选框勾选切换、新建、清空）。
+// @design docs/DESIGN-group-tag.md
+func pickTagForRepo(ctx *appCtx, r *state.Repo) bool {
+	all := allTagNames(ctx)
+	curTags := r.Tags
+
+	tagStr := "无"
+	if len(curTags) > 0 {
+		tagStr = strings.Join(curTags, ", ")
+	}
+	fmt.Printf("\n仓库: %s (当前标签: %s)\n", r.Name, tagStr)
+
+	// 若系统内目前完全没有标签
+	if len(all) == 0 {
+		fmt.Println("\n当前全集尚未创建任何标签。")
+		fmt.Println("  +) [新建标签并打上...]")
+		fmt.Println("  q) 取消")
+		fmt.Println()
+		choice := readPrompt(ctx, "请选择 (+ / q 取消): ")
+		choice = cleanTagInput(choice)
+		if choice == "+" || strings.EqualFold(choice, "new") || strings.EqualFold(choice, "add") {
+			names := readPrompt(ctx, "请输入新标签名称 (多个可用逗号/空格隔开): ")
+			names = cleanTagInput(names)
+			if names == "" {
+				fmt.Println("标签名称为空，已取消。")
+				return false
+			}
+			added := splitList(names)
+			for _, t := range added {
+				t = strings.TrimSpace(t)
+				if t != "" && !hasTag(r, t) {
+					r.Tags = append(r.Tags, t)
+				}
+			}
+			r.ReviewedAt = time.Now().Format(time.RFC3339)
+			state.Canonicalize(r)
+			if err := ctx.state.Save(); err != nil {
+				fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+				return false
+			}
+			refreshCurrentScope(ctx)
+			fmt.Printf("已为 %s 添加标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
+			return true
+		}
+		fmt.Println("已取消。")
+		return false
+	}
+
+	// 系统内已有标签：复选勾选模式
+	for {
+		curMap := make(map[string]bool)
+		for _, t := range r.Tags {
+			curMap[strings.ToLower(t)] = true
+		}
+
+		fmt.Println("\n现有标签 (输入编号切换勾选，支持多个编号用空格隔开):")
+		for i, t := range all {
+			mark := "[ ]"
+			if curMap[strings.ToLower(t)] {
+				mark = "[√]"
+			}
+			fmt.Printf("  %2d) %s %s\n", i+1, mark, t)
+		}
+		fmt.Println("   +) [新建标签...]")
+		if len(r.Tags) > 0 {
+			fmt.Println("   0) [清空此仓库所有标签]")
+		}
+		fmt.Println()
+
+		choice, ok := readPromptLine(ctx, "请选择 (编号 / + / 0 / q 完成退出): ")
+		if !ok {
+			return true
+		}
+		choice = cleanTagInput(choice)
+		if choice == "" || strings.EqualFold(choice, "q") || strings.EqualFold(choice, "quit") || strings.EqualFold(choice, "exit") {
+			fmt.Println("完成标签设置。")
+			return true
+		}
+
+		if choice == "0" || strings.EqualFold(choice, "clear") || strings.EqualFold(choice, "unset") {
+			r.Tags = nil
+			r.ReviewedAt = time.Now().Format(time.RFC3339)
+			state.Canonicalize(r)
+			_ = ctx.state.Save()
+			refreshCurrentScope(ctx)
+			fmt.Printf("已清空 %s 的所有标签。\n", r.Name)
+			return true
+		}
+
+		if choice == "+" || strings.EqualFold(choice, "new") || strings.EqualFold(choice, "add") {
+			names := readPrompt(ctx, "请输入新标签名称 (多个可用逗号/空格隔开): ")
+			names = cleanTagInput(names)
+			if names != "" {
+				added := splitList(names)
+				for _, t := range added {
+					t = strings.TrimSpace(t)
+					if t != "" && !hasTag(r, t) {
+						r.Tags = append(r.Tags, t)
+					}
+				}
+				r.ReviewedAt = time.Now().Format(time.RFC3339)
+				state.Canonicalize(r)
+				_ = ctx.state.Save()
+				refreshCurrentScope(ctx)
+				fmt.Printf("已更新 %s 标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
+				all = allTagNames(ctx)
+			}
+			continue
+		}
+
+		tokens := strings.Fields(choice)
+		changed := false
+		for _, tok := range tokens {
+			idx, err := strconv.Atoi(tok)
+			if err == nil && idx >= 1 && idx <= len(all) {
+				tagToToggle := all[idx-1]
+				if hasTag(r, tagToToggle) {
+					r.Tags = removeTag(r, tagToToggle)
+				} else {
+					r.Tags = append(r.Tags, tagToToggle)
+				}
+				changed = true
+			} else {
+				found := false
+				for _, t := range all {
+					if strings.EqualFold(t, tok) {
+						if hasTag(r, t) {
+							r.Tags = removeTag(r, t)
+						} else {
+							r.Tags = append(r.Tags, t)
+						}
+						changed = true
+						found = true
+						break
+					}
+				}
+				if !found {
+					fmt.Printf("忽略无效选项: %s\n", tok)
+				}
+			}
+		}
+
+		if changed {
+			r.ReviewedAt = time.Now().Format(time.RFC3339)
+			state.Canonicalize(r)
+			_ = ctx.state.Save()
+			refreshCurrentScope(ctx)
+			fmt.Printf("已更新 %s 标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
+		}
+	}
+}
+
+func pickRepoToRemoveFromTag(ctx *appCtx, tagName string) bool {
+	var repos []*state.Repo
+	for _, r := range ctx.state.Repos {
+		if hasTag(r, tagName) {
+			repos = append(repos, r)
+		}
+	}
+	if len(repos) == 0 {
+		fmt.Printf("标签 %s 下当前没有关联仓库。\n", tagName)
+		return false
+	}
+	fmt.Printf("\n拥有标签 [%s] 的仓库 (共 %d 个):\n", tagName, len(repos))
+	for i, r := range repos {
+		fmt.Printf("  %2d) %s\n", i+1, r.Name)
+	}
+	fmt.Println()
+	choice := readPrompt(ctx, "请选择要移除此标签的仓库 (编号 / q 取消): ")
+	choice = cleanTagInput(choice)
+	if choice == "" || strings.EqualFold(choice, "q") || strings.EqualFold(choice, "quit") {
+		fmt.Println("已取消。")
+		return false
+	}
+	var target *state.Repo
+	idx, err := strconv.Atoi(choice)
+	if err == nil && idx >= 1 && idx <= len(repos) {
+		target = repos[idx-1]
+	} else {
+		for _, r := range repos {
+			if strings.EqualFold(r.Name, choice) || strings.EqualFold(r.ID, choice) {
+				target = r
+				break
+			}
+		}
+	}
+	if target == nil {
+		fmt.Printf("无效的选项: %s\n", choice)
+		return false
+	}
+	target.Tags = removeTag(target, tagName)
+	target.ReviewedAt = time.Now().Format(time.RFC3339)
+	state.Canonicalize(target)
+	_ = ctx.state.Save()
+	refreshCurrentScope(ctx)
+	fmt.Printf("已将 %s 的标签 [%s] 移除。\n", target.Name, tagName)
+	return true
+}
+
+func pickTagActionInTagScope(ctx *appCtx, tagName string) int {
+	var count int
+	for _, r := range ctx.state.Repos {
+		if hasTag(r, tagName) {
+			count++
+		}
+	}
+	fmt.Printf("\n当前标签: %s (共 %d 个仓库)\n", tagName, count)
+	fmt.Println("  1) 移除关联仓库 (rm / clear)")
+	fmt.Println("  2) 添加关联仓库 (add)")
+	fmt.Println("  3) 查看所有标签 (list)")
+	fmt.Println()
+	choice := readPrompt(ctx, "请选择操作 (编号 / q 取消): ")
+	choice = cleanTagInput(choice)
+	switch choice {
+	case "1", "rm", "clear":
+		pickRepoToRemoveFromTag(ctx, tagName)
+		return 0
+	case "2", "add":
+		kw := readPrompt(ctx, "请输入要添加此标签的仓库名称/关键字: ")
+		kw = cleanTagInput(kw)
+		if kw == "" {
+			fmt.Println("已取消。")
+			return 0
+		}
+		r := pickTargetGlobal(ctx, "tag add", kw)
+		if r == nil {
+			return 2
+		}
+		if hasTag(r, tagName) {
+			fmt.Printf("仓库 %s 已拥有标签 [%s]。\n", r.Name, tagName)
+			return 0
+		}
+		r.Tags = append(r.Tags, tagName)
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		_ = ctx.state.Save()
+		refreshCurrentScope(ctx)
+		fmt.Printf("已为 %s 添加标签: %s\n", r.Name, tagName)
+		return 0
+	case "3", "list", "ls":
+		return printAllTagsWithHints(ctx)
+	default:
+		return 0
+	}
+}
+
 func cmdTag(ctx *appCtx, a args) int {
 	sub := ""
 	if len(a.pos) > 0 {
@@ -2399,22 +2697,20 @@ func cmdTag(ctx *appCtx, a args) int {
 	}
 	switch sub {
 	case "", "list", "ls":
-		tags := map[string]int{}
-		for _, r := range ctx.state.Repos {
-			for _, t := range r.Tags {
-				tags[t]++
+		if sub == "" {
+			// Priority 1: 单仓聚焦上下文
+			if target := ctx.res.TargetRepo(); target != nil {
+				pickTagForRepo(ctx, target)
+				return 0
+			}
+			// Priority 2: 标签作用域上下文
+			if ctx.res != nil && ctx.res.NodeType == scope.NodeTag && len(ctx.res.Scope.Segs) > 0 {
+				tagName := ctx.res.Scope.Segs[len(ctx.res.Scope.Segs)-1].Ident
+				return pickTagActionInTagScope(ctx, tagName)
 			}
 		}
-		if len(tags) == 0 {
-			fmt.Println("当前尚未创建任何标签。可用 'tag add <标签名>' 给仓库打标签。")
-			return 0
-		}
-		fmt.Println("现有标签:")
-		keys := util.SortedKeys(tags)
-		for _, k := range keys {
-			fmt.Printf("  %-20s %d 个仓库\n", k, tags[k])
-		}
-		return 0
+		return printAllTagsWithHints(ctx)
+
 	case "add", "set":
 		var kw, tagStr string
 		target := ctx.res.TargetRepo()
@@ -2429,6 +2725,10 @@ func cmdTag(ctx *appCtx, a args) int {
 			kw = a.pos[1]
 			tagStr = a.pos[2]
 		} else {
+			if target != nil {
+				pickTagForRepo(ctx, target)
+				return 0
+			}
 			fmt.Println("用法: tag add [仓库] <标签,标签...>")
 			return 2
 		}
@@ -2441,9 +2741,11 @@ func cmdTag(ctx *appCtx, a args) int {
 		} else {
 			r = target
 		}
+		tagStr = cleanTagInput(tagStr)
 		newTags := splitList(tagStr)
 		for _, t := range newTags {
-			if !hasTag(r, t) {
+			t = strings.TrimSpace(t)
+			if t != "" && !hasTag(r, t) {
 				r.Tags = append(r.Tags, t)
 			}
 		}
@@ -2453,9 +2755,16 @@ func cmdTag(ctx *appCtx, a args) int {
 			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
 			return 1
 		}
+		refreshCurrentScope(ctx)
 		fmt.Printf("已更新 %s 标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
 		return 0
+
 	case "rm", "del", "remove":
+		if ctx.res != nil && ctx.res.NodeType == scope.NodeTag && len(ctx.res.Scope.Segs) > 0 && len(a.pos) == 1 {
+			tagName := ctx.res.Scope.Segs[len(ctx.res.Scope.Segs)-1].Ident
+			pickRepoToRemoveFromTag(ctx, tagName)
+			return 0
+		}
 		var kw, tagStr string
 		target := ctx.res.TargetRepo()
 		if len(a.pos) == 2 {
@@ -2481,9 +2790,13 @@ func cmdTag(ctx *appCtx, a args) int {
 		} else {
 			r = target
 		}
+		tagStr = cleanTagInput(tagStr)
 		delTags := splitList(tagStr)
 		for _, t := range delTags {
-			r.Tags = removeTag(r, t)
+			t = strings.TrimSpace(t)
+			if t != "" {
+				r.Tags = removeTag(r, t)
+			}
 		}
 		r.ReviewedAt = time.Now().Format(time.RFC3339)
 		state.Canonicalize(r)
@@ -2491,16 +2804,68 @@ func cmdTag(ctx *appCtx, a args) int {
 			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
 			return 1
 		}
+		refreshCurrentScope(ctx)
 		fmt.Printf("已更新 %s 标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
 		return 0
+
+	case "clear", "unset":
+		target := ctx.res.TargetRepo()
+		var r *state.Repo
+		if len(a.pos) >= 2 {
+			r = pickTarget(ctx, "tag clear", a.pos[1])
+			if r == nil {
+				return 2
+			}
+		} else if target != nil {
+			r = target
+		} else if ctx.res != nil && ctx.res.NodeType == scope.NodeTag && len(ctx.res.Scope.Segs) > 0 {
+			tagName := ctx.res.Scope.Segs[len(ctx.res.Scope.Segs)-1].Ident
+			pickRepoToRemoveFromTag(ctx, tagName)
+			return 0
+		} else {
+			fmt.Println("用法: tag clear [仓库关键字]")
+			return 2
+		}
+		r.Tags = nil
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		_ = ctx.state.Save()
+		refreshCurrentScope(ctx)
+		fmt.Printf("已清空 %s 的所有标签。\n", r.Name)
+		return 0
+
 	case "filter", "find":
 		subArgs := a
 		if len(subArgs.pos) > 0 {
 			subArgs.pos = subArgs.pos[1:]
 		}
 		return cmdLsByTag(ctx, subArgs)
+
 	default:
-		fmt.Printf("未知 tag 子命令: %s (可选: list / add / rm / filter / find)\n", sub)
+		// Priority 1: 单仓聚焦下，敲 tag <标签...> 直接追加
+		if target := ctx.res.TargetRepo(); target != nil && len(a.pos) >= 1 {
+			for _, tok := range a.pos {
+				tok = cleanTagInput(tok)
+				for _, t := range splitList(tok) {
+					t = strings.TrimSpace(t)
+					if t != "" && !hasTag(target, t) {
+						target.Tags = append(target.Tags, t)
+					}
+				}
+			}
+			target.ReviewedAt = time.Now().Format(time.RFC3339)
+			state.Canonicalize(target)
+			_ = ctx.state.Save()
+			refreshCurrentScope(ctx)
+			fmt.Printf("已更新 %s 标签: %s\n", target.Name, strings.Join(target.Tags, ", "))
+			return 0
+		}
+		// Priority 4/5: 全局/目录视角下，敲 tag <仓库名>
+		arg := cleanTagInput(a.pos[0])
+		if r := pickTarget(ctx, "tag", arg); r != nil {
+			pickTagForRepo(ctx, r)
+			return 0
+		}
 		return 2
 	}
 }
@@ -2892,14 +3257,14 @@ func readPromptLine(ctx *appCtx, msg string) (string, bool) {
 		if err != nil {
 			return "", false
 		}
-		return strings.TrimSpace(line), true
+		return cleanTerminalInput(line), true
 	}
 	if ctx != nil && ctx.pipeScanner != nil {
 		fmt.Print(msg)
 		if !ctx.pipeScanner.Scan() {
 			return "", false
 		}
-		return strings.TrimSpace(ctx.pipeScanner.Text()), true
+		return cleanTerminalInput(ctx.pipeScanner.Text()), true
 	}
 	fmt.Print(msg)
 	rd := bufio.NewReader(os.Stdin)
@@ -2907,7 +3272,7 @@ func readPromptLine(ctx *appCtx, msg string) (string, bool) {
 	if err != nil && len(line) == 0 {
 		return "", false
 	}
-	return strings.TrimSpace(line), true
+	return cleanTerminalInput(line), true
 }
 
 func readPrompt(ctx *appCtx, msg string) string {
