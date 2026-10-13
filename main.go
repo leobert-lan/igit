@@ -933,6 +933,16 @@ func repoGist(r *state.Repo) string {
 	if !r.HasUpstream {
 		parts = append(parts, "没配上游")
 	}
+	if r.Group != "" {
+		parts = append(parts, "["+r.Group+"]")
+	}
+	if len(r.Tags) > 0 {
+		var tags []string
+		for _, t := range r.Tags {
+			tags = append(tags, "#"+t)
+		}
+		parts = append(parts, strings.Join(tags, " "))
+	}
 	if len(parts) == 0 {
 		return "干净"
 	}

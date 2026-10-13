@@ -79,6 +79,7 @@ type Item struct {
 	Target  string // 可以 cd 进去的 scope 字符串
 	Count   int    // 集合类子项带的数量
 	Summary string // 仓库类子项的一句话摘要
+	Repo    *state.Repo // 关联的具体仓库（若为 DimRepo）
 }
 
 // Totals 是节点内的汇总数字。
@@ -730,6 +731,7 @@ func repoChildren(sc Scope, repos []*state.Repo) []Item {
 			Target:  sc.Child(Seg{Dim: DimRepo, Ident: r.Name}).String(),
 			Count:   1,
 			Summary: Summary(r),
+			Repo:    r,
 		})
 	}
 	return out
@@ -766,7 +768,7 @@ func topDir(p string) string {
 	return vol + string(filepath.Separator) + parts[0]
 }
 
-// Summary 给仓库子项的一句话摘要。
+// Summary 给仓库子项的一句话摘要，包含分支/状态、所属分组与标签。
 func Summary(r *state.Repo) string {
 	var b []string
 	if r.Branch != "" {
@@ -786,6 +788,16 @@ func Summary(r *state.Repo) string {
 	}
 	if r.Missing {
 		b = append(b, "已丢失")
+	}
+	if r.Group != "" {
+		b = append(b, "["+r.Group+"]")
+	}
+	if len(r.Tags) > 0 {
+		var tags []string
+		for _, t := range r.Tags {
+			tags = append(tags, "#"+t)
+		}
+		b = append(b, strings.Join(tags, " "))
 	}
 	return strings.Join(b, " · ")
 }

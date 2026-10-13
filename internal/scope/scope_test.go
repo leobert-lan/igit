@@ -348,3 +348,58 @@ func TestEmptyGroupScope(t *testing.T) {
 		t.Fatal("不存在的分组应当返回错误，但实际没有报错")
 	}
 }
+
+func TestSummaryWithGroupAndTags(t *testing.T) {
+	r1 := &state.Repo{
+		Name:   "AgyArchiveHelper",
+		Branch: "master",
+		Group:  "leobert",
+		Tags:   []string{"backup", "helper"},
+	}
+	s1 := Summary(r1)
+	if s1 != "master · [leobert] · #backup #helper" {
+		t.Fatalf("Summary 格式不符合预期: %q", s1)
+	}
+
+	r2 := &state.Repo{
+		Name:   "GitSyncer",
+		Branch: "main",
+		Dirty:  true,
+		Group:  "job",
+		Tags:   []string{"sync"},
+	}
+	s2 := Summary(r2)
+	if s2 != "main · 脏 · [job] · #sync" {
+		t.Fatalf("Summary 格式不符合预期: %q", s2)
+	}
+
+	r3 := &state.Repo{
+		Name:   "PinsLogParser",
+		Branch: "dev",
+		Ahead:  2,
+		Group:  "study",
+	}
+	s3 := Summary(r3)
+	if s3 != "dev · 领先 2 · [study]" {
+		t.Fatalf("Summary 格式不符合预期: %q", s3)
+	}
+
+	r4 := &state.Repo{
+		Name:   "DSP_learning",
+		Branch: "master",
+		Tags:   []string{"dsp"},
+	}
+	s4 := Summary(r4)
+	if s4 != "master · #dsp" {
+		t.Fatalf("Summary 格式不符合预期: %q", s4)
+	}
+
+	r5 := &state.Repo{
+		Name:   "FileManager",
+		Branch: "master",
+	}
+	s5 := Summary(r5)
+	if s5 != "master" {
+		t.Fatalf("Summary 格式不符合预期: %q", s5)
+	}
+}

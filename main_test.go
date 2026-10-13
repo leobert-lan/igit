@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -738,6 +740,72 @@ func TestCmdTagInTagScope(t *testing.T) {
 	}
 	if !hasTag(r2, "rust") {
 		t.Fatal("r2 的 rust 标签不应被移除")
+	}
+}
+
+func TestCmdLsDisplaysGroupAndTags(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p1 := filepath.Join(tmpDir, "AgyArchiveHelper")
+	p2 := filepath.Join(tmpDir, "GitSyncer")
+	p3 := filepath.Join(tmpDir, "PinsLogParser")
+	p4 := filepath.Join(tmpDir, "DSP_learning")
+
+	st.Repos = append(st.Repos,
+		&state.Repo{ID: util.NormalizePath(p1), Path: p1, Name: "AgyArchiveHelper", Branch: "master", Group: "leobert", Tags: []string{"backup", "helper"}, Kind: "repo"},
+		&state.Repo{ID: util.NormalizePath(p2), Path: p2, Name: "GitSyncer", Branch: "master", Dirty: true, Group: "job", Tags: []string{"sync"}, Kind: "repo"},
+		&state.Repo{ID: util.NormalizePath(p3), Path: p3, Name: "PinsLogParser", Branch: "master", Ahead: 2, Group: "study", Kind: "repo"},
+		&state.Repo{ID: util.NormalizePath(p4), Path: p4, Name: "DSP_learning", Branch: "master", Tags: []string{"dsp"}, Kind: "repo"},
+	)
+	_ = st.Save()
+
+	sc, err := scope.Parse("file:" + tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 捕获 cmdLs 的标准输出
+	oldStdout := os.Stdout
+	rPipe, wPipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = wPipe
+
+	code := cmdLs(ctx, parseArgs([]string{}))
+	_ = wPipe.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, rPipe)
+	output := buf.String()
+
+	if code != 0 {
+		t.Fatalf("cmdLs 执行失败: %d", code)
+	}
+
+	expectedSubstrings := []string{
+		"[leobert]",
+		"#backup #helper",
+		"[job]",
+		"#sync",
+		"[study]",
+		"#dsp",
+	}
+	for _, exp := range expectedSubstrings {
+		if !strings.Contains(output, exp) {
+			t.Fatalf("cmdLs 输出缺少期望的标记 %q, 完整输出:\n%s", exp, output)
+		}
 	}
 }
 
