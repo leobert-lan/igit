@@ -192,6 +192,18 @@ func dispatch(ctx *appCtx, cmd string, a args) int {
 		return cmdExport(ctx, a)
 	case "config":
 		return cmdConfig(ctx, a)
+	case "ignore":
+		return cmdIgnore(ctx, a)
+	case "remote":
+		return cmdRemote(ctx, a)
+	case "fetch":
+		return cmdFetch(ctx, a)
+	case "pull":
+		return cmdPull(ctx, a)
+	case "commit":
+		return cmdCommit(ctx, a)
+	case "push":
+		return cmdPush(ctx, a)
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令: %s\n\n", cmd)
 		printHelp(nil)
@@ -330,6 +342,20 @@ func candidates(ctx *appCtx, head, word string) []string {
 		return matchPrefix(allTagNames(ctx), word)
 	case "status":
 		return matchPrefix([]string{"new", "active", "done", "archived", "待处理", "跟进中", "已处理", "已归档"}, word)
+	case "ignore":
+		if len(fields) == 1 && endsSpace || (len(fields) == 2 && !endsSpace) {
+			return matchPrefix([]string{"add", "show", "untracked"}, word)
+		}
+		if len(fields) >= 2 && fields[1] == "add" {
+			return matchPrefix(untrackedCandidates(ctx), word)
+		}
+	case "remote":
+		if len(fields) == 1 && endsSpace || (len(fields) == 2 && !endsSpace) {
+			return matchPrefix([]string{"user", "list", "remember", "clear-user"}, word)
+		}
+		if len(fields) >= 2 && fields[1] == "user" {
+			return matchPrefix(remoteUserCandidates(ctx), word)
+		}
 	case "help":
 		return matchPrefix(helpTopicNames(), word)
 	}
@@ -425,13 +451,13 @@ func commandsFor(ctx *appCtx) []string {
 	}
 	switch res.Kind {
 	case scope.KindRepo:
-		return append(common, "ls", "list", "open", "tig", "stats", "status", "note", "scan", "dupes", "set")
+		return append(common, "ls", "list", "open", "tig", "stats", "status", "note", "scan", "dupes", "set", "ignore", "remote", "fetch", "pull", "commit", "push")
 	case scope.KindRoot:
 		return append(common,
-			"ls", "list", "scan", "stats", "tree", "triage", "tui", "export", "dupes", "dirs", "tig")
+			"ls", "list", "scan", "stats", "tree", "triage", "tui", "export", "dupes", "dirs", "tig", "fetch", "remote")
 	default:
 		acts := []string{
-			"ls", "list", "tree", "triage", "tui", "stats", "export", "set", "status", "note", "tig", "open", "hide", "fold", "dirs", "scan", "dupes",
+			"ls", "list", "tree", "triage", "tui", "stats", "export", "set", "status", "note", "tig", "open", "hide", "fold", "dirs", "scan", "dupes", "fetch", "remote",
 		}
 		return append(common, acts...)
 	}
@@ -986,6 +1012,12 @@ func availableActions(res *scope.Resolved) []action {
 		acts := []action{
 			{"tig", "拉起 tig 查看提交历史与改动"},
 			{"open", "在资源管理器中打开此目录"},
+			{"ignore [add]", "查看或追加 .gitignore 规则 (支持 Tab 补全)"},
+			{"remote [user]", "查看远端或绑定推送账号"},
+			{"fetch", "拉取远端更新并分析同步拓扑"},
+			{"pull", "安全快进同步 (阻止隐式合并与分叉)"},
+			{"commit \"说明\"", "全量暂存并提交当前改动"},
+			{"push", "推送到远端 (直接交互输入密码)"},
 			{"stats", "查看此仓库详细统计画像"},
 			{"list", "查看此仓库表格信息"},
 			{"group [set]", "查看或调整所属分组"},

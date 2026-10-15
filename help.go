@@ -28,6 +28,7 @@ const helpOverviewText = `igit - 本地 git 仓库扫描与整理工具 (v` + ve
   浏览 (Explore)      list | tree | stats | triage (TUI面板)
   整理 (Triage)       tag | group | status | note | set
   动作 (Actions)      open | tig | export
+  自管理 (GitOps)     ignore | remote | fetch | pull | commit | push
   配置 (Config)       scan | config | dirs (hide/fold) | prune
 
 通用选项:
@@ -324,6 +325,41 @@ var commandHelps = map[string]string{
 	"fold": helpTopicRulesText,
 	"unfold": helpTopicRulesText,
 	"config": helpTopicConfigText,
+
+	"ignore": `igit ignore - 简易 .gitignore 创建与规则追加 (支持 Tab 补全)
+
+用法:
+  ignore               查看当前仓库 .gitignore 有效规则
+  ignore add <模式...>  追加规则到 .gitignore (文件不存在时自动新建，支持 Tab 补全)
+  ignore untracked     查看当前工作区未被跟踪的目录与文件`,
+
+	"remote": `igit remote - 远端检查与 HTTPS 用户名记忆管理
+
+用法:
+  remote               列出当前仓库所有远端详细地址与绑定的鉴权用户
+  remote user [用户名] 将用户名固化进远端 URL (Push 时仅需输密码，且按域名跨仓记忆)
+  remote remember <域名> <用户> 手动记录指定域名的默认常用账号
+  remote clear-user    移除远端 URL 中的嵌入用户名`,
+
+	"fetch": `igit fetch - 远端更新抓取与状态拓扑诊断
+
+用法:
+  fetch [远端名]       拉取最新 refs 并原位刷新 ahead/behind 状态 (单仓或集合批量)`,
+
+	"pull": `igit pull - 仅快进安全同步 (阻止冲突与命令行 Merge)
+
+用法:
+  pull                 仅在工作区干净且无分叉时执行快进同步 (遇分叉提示使用可视化工具处理)`,
+
+	"commit": `igit commit - 全量暂存并提交改动 (add -A & commit)
+
+用法:
+  commit [提交说明]    将工作区所有改动一次性打包提交 (不传说明时提示输入)`,
+
+	"push": `igit push - 推送到远端跟踪分支 (直接交互输入密码)
+
+用法:
+  push                 推送到远端 (未建跟踪分支时给出标准 upstream 命令提示)`,
 }
 
 var helpTopics = map[string]string{

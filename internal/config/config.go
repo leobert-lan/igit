@@ -28,6 +28,9 @@ type Config struct {
 	// 占位符 {dir} = 仓库目录，{cmd} = 完整的 tig 命令行（路径已按需加引号）。
 	// 例：wt.exe -d "{dir}" {cmd}   或   wt.exe -w new -d "{dir}" {cmd}
 	TermCmd string `json:"term_cmd"`
+
+	// HostUsers：域名到默认 HTTPS 用户名的映射记忆（例如 gitlab.corp.com -> zhangsan）
+	HostUsers map[string]string `json:"host_users,omitempty"`
 }
 
 // DefaultExcludeNames 默认跳过的噪音目录名（命中即不再下钻）。
@@ -59,6 +62,7 @@ func Default() *Config {
 		MaxDepth:     10,
 		Jobs:         defaultJobs(),
 		GitExe:       "",
+		HostUsers:    map[string]string{},
 	}
 	return c
 }
@@ -160,6 +164,9 @@ func Load(configPath string) (*Config, error) {
 	}
 	if len(c.ExcludeNames) == 0 && len(c.Roots) == 0 {
 		c.ExcludeNames = append([]string{}, DefaultExcludeNames...)
+	}
+	if c.HostUsers == nil {
+		c.HostUsers = map[string]string{}
 	}
 	return &c, nil
 }
