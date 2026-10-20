@@ -33,15 +33,14 @@ import (
 
 const version = "0.1.0"
 
-
 type appCtx struct {
-	home    string
-	cfg     *config.Config
-	cfgPath string
-	stPath  string
-	state   *state.State
-	res     *scope.Resolved // 当前作用域，按需解析
-	prev    *scope.Resolved // 上一个作用域，cd - 用
+	home        string
+	cfg         *config.Config
+	cfgPath     string
+	stPath      string
+	state       *state.State
+	res         *scope.Resolved    // 当前作用域，按需解析
+	prev        *scope.Resolved    // 上一个作用域，cd - 用
 	repl        bool               // 是否处于交互会话里
 	rl          *readline.Instance // 会话内的交互式 readline 实例
 	pipeScanner *bufio.Scanner     // 管道会话模式下的 scanner
@@ -586,10 +585,14 @@ func prompt(ctx *appCtx) string {
 		return "igit > "
 	}
 	trail := ctx.res.Scope.TrailString()
-	if ctx.res.TargetRepo() != nil && (ctx.res.NodeType == scope.NodeRepo || ctx.res.Kind == scope.KindRepo) {
-		return fmt.Sprintf("igit [%s] > ", trail)
+	hiddenTag := ""
+	if ctx.res.IsHidden {
+		hiddenTag = " (已隐藏)"
 	}
-	return fmt.Sprintf("igit [%s · %d 个仓库] > ", trail, ctx.res.Totals.Repos)
+	if ctx.res.TargetRepo() != nil && (ctx.res.NodeType == scope.NodeRepo || ctx.res.Kind == scope.KindRepo) {
+		return fmt.Sprintf("igit [%s%s] > ", trail, hiddenTag)
+	}
+	return fmt.Sprintf("igit [%s · %d 个仓库%s] > ", trail, ctx.res.Totals.Repos, hiddenTag)
 }
 
 func scopeLine(res *scope.Resolved) string {
@@ -628,7 +631,6 @@ func tokenize(s string) []string {
 	}
 	return out
 }
-
 
 // ---------------------------------------------------------------- 参数解析
 
@@ -828,10 +830,14 @@ func setResolved(ctx *appCtx, sc scope.Scope) bool {
 }
 
 func scopeLabel(res *scope.Resolved) string {
+	lbl := "全集"
 	if s := res.Scope.TrailString(); s != "" && s != "/" {
-		return s
+		lbl = s
 	}
-	return "全集"
+	if res != nil && res.IsHidden {
+		lbl += " (已隐藏)"
+	}
+	return lbl
 }
 
 // scopeRepos 当前作用域圈定的仓库。全集或没定出作用域时返回 nil，交给调用方按 st.Repos 处理。
@@ -1151,6 +1157,13 @@ func cmdPwd(ctx *appCtx, a args) int {
 	return 0
 }
 
+func isDrivePath(s string) bool {
+	if len(s) >= 2 && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) && s[1] == ':' {
+		return true
+	}
+	return false
+}
+
 func cmdCd(ctx *appCtx, a args) int {
 	target := ""
 	if len(a.pos) > 0 {
@@ -1194,6 +1207,17 @@ func cmdCd(ctx *appCtx, a args) int {
 			return 1
 		}
 		return setScope(ctx, ctx.res.Scope.Parent())
+	}
+
+	// 智能识别 Windows 绝对路径或以盘符开头的目录 (如 D:\repos 或 D:/repos)
+	if isDrivePath(target) || filepath.IsAbs(target) {
+		clean := filepath.Clean(target)
+		sc := scope.Scope{
+			Segs: []scope.Seg{
+				{Dim: scope.DimFile, Ident: clean, Explicit: true},
+			},
+		}
+		return setScope(ctx, sc)
 	}
 
 	sc, err := scope.Parse(target)
@@ -1870,6 +1894,9 @@ func cmdSet(ctx *appCtx, a args) int {
 		return 1
 	}
 	fmt.Printf("已更新 %d 个仓库 -> %s\n", len(list), ctx.state.Path())
+	if ctx.res != nil && ctx.res.IsHidden && hasGroup {
+		fmt.Println("提示: 当前目录处于 hide 隐藏状态。如需正式纳入日常大盘视野，请执行 'unhide' 解封本目录。")
+	}
 	return 0
 }
 
@@ -1891,6 +1918,7 @@ func printAllGroupsWithHints(ctx *appCtx) int {
 		fmt.Printf("  %-20s %d 个仓库\n", k, groups[k])
 	}
 	fmt.Println("\n提示:")
+	fmt.Println("  输入 'group' 可进入交互式分组管理向导（支持新增分组、增加/移出仓库）;")
 	fmt.Println("  在单仓下输入 'group' 可直接按编号分配/切换分组;")
 	fmt.Println("  在全集下输入 'group <仓库名>' 可为指定仓库选择分组;")
 	fmt.Println("  输入 'group new <名称>' 可新建空分组。")
@@ -1938,28 +1966,44 @@ func pickGroupForRepo(ctx *appCtx, r *state.Repo) bool {
 		return false
 	}
 
-	fmt.Println("\n请选择目标分组:")
+	title := "\n请选择目标分组:"
+	items := make([]pick.MenuItem, 0, len(all)+3)
 	for i, g := range all {
-		mark := "  "
+		badge := ""
 		if strings.EqualFold(g, curGroup) {
-			mark = "[√]"
+			badge = "[√]"
 		}
-		fmt.Printf("  %2d) %s %s\n", i+1, mark, g)
+		items = append(items, pick.MenuItem{
+			Key:   strconv.Itoa(i + 1),
+			Label: g,
+			Badge: badge,
+			Value: g,
+		})
 	}
-	fmt.Println("   +) [新建分组...]")
+	items = append(items, pick.MenuItem{
+		Key:   "+",
+		Label: "[新建分组...]",
+	})
 	if curGroup != "" {
-		fmt.Println("   0) [清除分组] (移出当前分组)")
+		items = append(items, pick.MenuItem{
+			Key:    "0",
+			Label:  "[清除分组]",
+			Detail: "(移出当前分组)",
+		})
 	}
-	fmt.Println()
+	items = append(items, pick.MenuItem{
+		Key:   "q",
+		Label: "[取消]",
+	})
 
-	choice := readPrompt(ctx, "请选择 (编号 / + / 0 / q 取消): ")
-	if choice == "" || strings.EqualFold(choice, "q") || strings.EqualFold(choice, "quit") {
+	chosen, cancelled := selectMenu(ctx, title, "请选择 (编号 / + / 0 / q 取消): ", items)
+	if cancelled || chosen == nil || chosen.Key == "q" {
 		fmt.Println("已取消。")
 		return false
 	}
 
 	var targetGroup string
-	switch choice {
+	switch chosen.Key {
 	case "0", "clear", "unset":
 		if curGroup == "" {
 			fmt.Println("当前尚未设置分组，无需清除。")
@@ -1984,16 +2028,10 @@ func pickGroupForRepo(ctx *appCtx, r *state.Repo) bool {
 		}
 		targetGroup = name
 	default:
-		idx, err := strconv.Atoi(choice)
-		if err == nil && idx >= 1 && idx <= len(all) {
-			targetGroup = all[idx-1]
+		if val, ok := chosen.Value.(string); ok && val != "" {
+			targetGroup = val
 		} else {
-			if ctx.state.HasGroup(choice) {
-				targetGroup = choice
-			} else {
-				fmt.Printf("无效的选项: %s\n", choice)
-				return false
-			}
+			targetGroup = chosen.Label
 		}
 	}
 
@@ -2023,7 +2061,7 @@ func pickGroupForRepo(ctx *appCtx, r *state.Repo) bool {
 	return true
 }
 
-// pickRepoToRemoveFromGroup 在分组作用域下交互式列出组内仓库并移出。
+// pickRepoToRemoveFromGroup 在分组作用域下交互式列出组内仓库并移出（支持多选）。
 // @design docs/DESIGN-group-tag.md#33-分组内移出仓库原型-pickrepotoremovefromgroup
 func pickRepoToRemoveFromGroup(ctx *appCtx, grpName string) bool {
 	var repos []*state.Repo
@@ -2037,44 +2075,52 @@ func pickRepoToRemoveFromGroup(ctx *appCtx, grpName string) bool {
 		return false
 	}
 
-	fmt.Printf("\n分组 %s 内的仓库 (共 %d 个):\n", grpName, len(repos))
+	title := fmt.Sprintf("\n分组 %s 内的仓库 (共 %d 个, 支持多选):", grpName, len(repos))
+	items := make([]pick.MenuItem, 0, len(repos))
 	for i, r := range repos {
-		fmt.Printf("  %2d) %s\n", i+1, r.Name)
+		items = append(items, pick.MenuItem{
+			Key:   strconv.Itoa(i + 1),
+			Label: r.Name,
+			Value: r,
+		})
 	}
-	fmt.Println()
 
-	choice := readPrompt(ctx, "请选择要移出的仓库 (序号 / q 取消): ")
-	if choice == "" || strings.EqualFold(choice, "q") || strings.EqualFold(choice, "quit") {
+	chosenItems, cancelled := selectMultiMenu(ctx, title, "请选择要移出的仓库编号 (空格或逗号分隔多选，输入 a 全选，q 取消): ", items)
+	if cancelled || len(chosenItems) == 0 {
 		fmt.Println("已取消。")
 		return false
 	}
 
-	var target *state.Repo
-	idx, err := strconv.Atoi(choice)
-	if err == nil && idx >= 1 && idx <= len(repos) {
-		target = repos[idx-1]
-	} else {
-		for _, r := range repos {
-			if strings.EqualFold(r.Name, choice) || strings.EqualFold(r.ID, choice) {
-				target = r
-				break
-			}
+	var targets []*state.Repo
+	for _, it := range chosenItems {
+		if r, ok := it.Value.(*state.Repo); ok && r != nil {
+			targets = append(targets, r)
 		}
 	}
-	if target == nil {
-		fmt.Printf("无效的选项: %s\n", choice)
+	if len(targets) == 0 {
+		fmt.Println("未选择任何有效仓库。")
 		return false
 	}
 
-	target.Group = ""
-	target.ReviewedAt = time.Now().Format(time.RFC3339)
-	state.Canonicalize(target)
+	now := time.Now().Format(time.RFC3339)
+	for _, target := range targets {
+		target.Group = ""
+		target.ReviewedAt = now
+		state.Canonicalize(target)
+	}
 	if err := ctx.state.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
 		return false
 	}
 	refreshCurrentScope(ctx)
-	fmt.Printf("已将 %s 从分组 %s 移出。\n", target.Name, grpName)
+	if len(targets) == 1 {
+		fmt.Printf("已将 %s 从分组 %s 移出。\n", targets[0].Name, grpName)
+	} else {
+		fmt.Printf("已将 %d 个仓库批量从分组 [%s] 移出:\n", len(targets), grpName)
+		for _, r := range targets {
+			fmt.Printf("  • %s\n", r.Name)
+		}
+	}
 	return true
 }
 
@@ -2087,18 +2133,24 @@ func pickGroupActionInGroupScope(ctx *appCtx, grpName string) int {
 			count++
 		}
 	}
-	fmt.Printf("\n分组: %s (共 %d 个仓库)\n", grpName, count)
-	fmt.Println("  1) 移出仓库 (rm / clear)")
-	fmt.Println("  2) 添加仓库 (add)")
-	fmt.Println("  3) 查看所有分组 (list)")
-	fmt.Println()
+	title := fmt.Sprintf("\n分组: %s (共 %d 个仓库)", grpName, count)
+	items := []pick.MenuItem{
+		{Key: "1", Label: "移出仓库", Detail: "(rm / clear)"},
+		{Key: "2", Label: "添加仓库", Detail: "(add)"},
+		{Key: "3", Label: "查看所有分组", Detail: "(list)"},
+		{Key: "q", Label: "[取消]"},
+	}
 
-	choice := readPrompt(ctx, "请选择操作 (编号 / q 取消): ")
-	switch choice {
-	case "1", "rm", "clear":
+	chosen, cancelled := selectMenu(ctx, title, "请选择操作 (编号 / q 取消): ", items)
+	if cancelled || chosen == nil || chosen.Key == "q" {
+		fmt.Println("已取消。")
+		return 0
+	}
+	switch chosen.Key {
+	case "1":
 		pickRepoToRemoveFromGroup(ctx, grpName)
 		return 0
-	case "2", "add":
+	case "2":
 		kw := readPrompt(ctx, "请输入要加入该分组的仓库名称/关键字: ")
 		if kw == "" {
 			fmt.Println("已取消。")
@@ -2128,14 +2180,456 @@ func pickGroupActionInGroupScope(ctx *appCtx, grpName string) int {
 		refreshCurrentScope(ctx)
 		fmt.Printf("已将 %s 加入分组: %s\n", r.Name, grpName)
 		return 0
-	case "3", "list", "ls":
+	case "3":
 		return printAllGroupsWithHints(ctx)
 	default:
-		if choice != "" && !strings.EqualFold(choice, "q") && !strings.EqualFold(choice, "quit") {
-			fmt.Printf("无效的选项: %s\n", choice)
-		}
 		return 0
 	}
+}
+
+// selectMenu 在当前上下文环境中弹出交互式菜单，透明兼容 Bubble Tea 交互式方向键选择与管道/自动化测试。
+func selectMenu(ctx *appCtx, title, promptStr string, items []pick.MenuItem) (*pick.MenuItem, bool) {
+	if ctx != nil && ctx.pipeScanner != nil {
+		if title != "" {
+			fmt.Println(title)
+		}
+		for _, it := range items {
+			line := fmt.Sprintf("%2s) ", it.Key)
+			if it.Badge != "" {
+				line += it.Badge + " "
+			}
+			line += it.Label
+			if it.Detail != "" {
+				line += " " + it.Detail
+			}
+			fmt.Println("  " + line)
+		}
+		fmt.Println()
+		if promptStr == "" {
+			promptStr = "请选择 (编号 / q 取消): "
+		}
+		ans, ok := readPromptLine(ctx, promptStr)
+		if !ok || ans == "" || strings.EqualFold(ans, "q") || strings.EqualFold(ans, "quit") || strings.EqualFold(ans, "esc") {
+			return nil, true
+		}
+		for i := range items {
+			if strings.EqualFold(items[i].Key, ans) {
+				return &items[i], false
+			}
+		}
+		if idx, err := strconv.Atoi(ans); err == nil && idx >= 1 && idx <= len(items) {
+			return &items[idx-1], false
+		}
+		for i := range items {
+			if strings.EqualFold(items[i].Label, ans) {
+				return &items[i], false
+			}
+		}
+		return nil, true
+	}
+
+	isInteractive := isTerminal(os.Stdin) && ctx != nil && ctx.repl
+	return pick.Menu(pick.MenuOpt{
+		Title:       title,
+		Prompt:      promptStr,
+		Items:       items,
+		Interactive: isInteractive,
+		Out:         os.Stdout,
+	})
+}
+
+// selectMultiMenu 弹出复选菜单，透明兼容 Bubble Tea 交互式方向键移动、空格/编号勾选、a 全选与管道/自动化测试。
+func selectMultiMenu(ctx *appCtx, title, promptStr string, items []pick.MenuItem) ([]*pick.MenuItem, bool) {
+	if ctx != nil && ctx.pipeScanner != nil {
+		if title != "" {
+			fmt.Println(title)
+		}
+		for _, it := range items {
+			mark := "[ ]"
+			if it.Selected {
+				mark = "[√]"
+			}
+			badgePart := ""
+			if it.Badge != "" {
+				badgePart = it.Badge + " "
+			}
+			detailPart := ""
+			if it.Detail != "" {
+				detailPart = " " + it.Detail
+			}
+			line := fmt.Sprintf("%2s) %s %s%s%s", it.Key, mark, badgePart, it.Label, detailPart)
+			fmt.Println("  " + line)
+		}
+		fmt.Println()
+		if promptStr == "" {
+			promptStr = "请选择编号 (支持多个用空格分隔，输入 a 全选，q 取消): "
+		}
+		ans, ok := readPromptLine(ctx, promptStr)
+		if !ok || ans == "" || strings.EqualFold(ans, "q") || strings.EqualFold(ans, "quit") || strings.EqualFold(ans, "esc") {
+			return nil, true
+		}
+		if strings.EqualFold(ans, "a") || strings.EqualFold(ans, "all") || ans == "*" {
+			res := make([]*pick.MenuItem, len(items))
+			for i := range items {
+				res[i] = &items[i]
+			}
+			return res, false
+		}
+		cleaner := strings.ReplaceAll(ans, ",", " ")
+		tokens := strings.Fields(cleaner)
+		pickedMap := make(map[int]bool)
+		for _, tok := range tokens {
+			if idx, err := strconv.Atoi(tok); err == nil && idx >= 1 && idx <= len(items) {
+				pickedMap[idx-1] = true
+				continue
+			}
+			for i := range items {
+				if strings.EqualFold(items[i].Key, tok) || strings.EqualFold(items[i].Label, tok) {
+					pickedMap[i] = true
+					break
+				}
+			}
+		}
+		if len(pickedMap) == 0 {
+			return nil, true
+		}
+		var res []*pick.MenuItem
+		for i := range items {
+			if pickedMap[i] {
+				res = append(res, &items[i])
+			}
+		}
+		return res, false
+	}
+
+	isInteractive := isTerminal(os.Stdin) && ctx != nil && ctx.repl
+	return pick.MultiMenu(pick.MenuOpt{
+		Title:       title,
+		Prompt:      promptStr,
+		Items:       items,
+		Interactive: isInteractive,
+		Out:         os.Stdout,
+	})
+}
+
+// pickGroupActionInDirectoryScope 在目录/非单仓作用域下交互式管理分组。
+// 支持新增分组，以及为选定分组增加/移除仓库。增加仓库严格限定在当前 file scope 内；
+// 移出仓库时，对超出当前目录范围的仓库予以明确区分标记显示。
+// @design docs/DESIGN-group-tag.md#34-目录作用域下的交互式分组管理原型-pickgroupactionindirectoryscope
+func pickGroupActionInDirectoryScope(ctx *appCtx) int {
+	scopeName := scopeLabel(ctx.res)
+	inScopeRepos := scopeRepos(ctx)
+
+	allGroups := ctx.state.AllGroups()
+
+	globalCounts := make(map[string]int)
+	inScopeCounts := make(map[string]int)
+	for _, r := range ctx.state.Repos {
+		if r.Group != "" {
+			globalCounts[r.Group]++
+			if inPool(inScopeRepos, r) {
+				inScopeCounts[r.Group]++
+			}
+		}
+	}
+
+	scopeRepoCount := len(ctx.state.Repos)
+	if inScopeRepos != nil {
+		scopeRepoCount = len(inScopeRepos)
+	}
+
+	if len(allGroups) == 0 {
+		fmt.Printf("\n当前尚未创建任何分组 (当前作用域 %s 内有 %d 个仓库)。\n", scopeName, scopeRepoCount)
+		items := []pick.MenuItem{
+			{Key: "+", Label: "[新建分组并管理...]", Detail: "创建新分组"},
+			{Key: "q", Label: "[取消]"},
+		}
+		chosen, cancelled := selectMenu(ctx, "请选择操作:", "请选择 (+ / q 取消): ", items)
+		if cancelled || chosen == nil || chosen.Key == "q" {
+			fmt.Println("已取消。")
+			return 0
+		}
+		name := readPrompt(ctx, "请输入新分组名称: ")
+		name = strings.TrimSpace(name)
+		if name == "" {
+			fmt.Println("分组名称不能为空，已取消。")
+			return 0
+		}
+		ctx.state.AddGroup(name)
+		_ = ctx.state.Save()
+		refreshCurrentScope(ctx)
+		fmt.Printf("已创建分组: %s\n", name)
+		return manageSingleGroupInDirectoryScope(ctx, name)
+	}
+
+	title := fmt.Sprintf("\n分组管理 (当前作用域: %s · %d 个仓库):", scopeName, scopeRepoCount)
+	items := make([]pick.MenuItem, 0, len(allGroups)+2)
+	for i, g := range allGroups {
+		detail := fmt.Sprintf("(全量: %d 个仓库, 本作用域: %d 个)", globalCounts[g], inScopeCounts[g])
+		items = append(items, pick.MenuItem{
+			Key:    strconv.Itoa(i + 1),
+			Label:  g,
+			Detail: detail,
+			Value:  g,
+		})
+	}
+	items = append(items, pick.MenuItem{
+		Key:   "+",
+		Label: "[新建分组...]",
+	})
+	items = append(items, pick.MenuItem{
+		Key:   "q",
+		Label: "[取消]",
+	})
+
+	chosen, cancelled := selectMenu(ctx, title, "请选择要管理的分组 (编号 / + / q 取消): ", items)
+	if cancelled || chosen == nil || chosen.Key == "q" {
+		fmt.Println("已取消。")
+		return 0
+	}
+
+	if chosen.Key == "+" {
+		name := readPrompt(ctx, "请输入新分组名称: ")
+		name = strings.TrimSpace(name)
+		if name == "" {
+			fmt.Println("分组名称不能为空，已取消。")
+			return 0
+		}
+		if !ctx.state.AddGroup(name) {
+			fmt.Printf("分组已存在: %s\n", name)
+		} else {
+			_ = ctx.state.Save()
+			refreshCurrentScope(ctx)
+			fmt.Printf("已创建分组: %s\n", name)
+		}
+		return manageSingleGroupInDirectoryScope(ctx, name)
+	}
+
+	targetGroup, ok := chosen.Value.(string)
+	if !ok || targetGroup == "" {
+		targetGroup = chosen.Label
+	}
+	return manageSingleGroupInDirectoryScope(ctx, targetGroup)
+}
+
+// manageSingleGroupInDirectoryScope 对指定分组进行增加/移除仓库操作。
+func manageSingleGroupInDirectoryScope(ctx *appCtx, grpName string) int {
+	inScopeRepos := scopeRepos(ctx)
+
+	var groupRepos []*state.Repo
+	for _, r := range ctx.state.Repos {
+		if strings.EqualFold(r.Group, grpName) {
+			groupRepos = append(groupRepos, r)
+		}
+	}
+	inScopeCount := 0
+	for _, r := range groupRepos {
+		if inPool(inScopeRepos, r) {
+			inScopeCount++
+		}
+	}
+
+	var candRepos []*state.Repo
+	pool := inScopeRepos
+	if pool == nil {
+		pool = ctx.state.Repos
+	}
+	for _, r := range pool {
+		if !strings.EqualFold(r.Group, grpName) {
+			candRepos = append(candRepos, r)
+		}
+	}
+
+	title := fmt.Sprintf("\n分组: %s (全量: %d 个仓库, 本作用域内: %d 个)", grpName, len(groupRepos), inScopeCount)
+	items := []pick.MenuItem{
+		{
+			Key:    "1",
+			Label:  "添加仓库到此分组",
+			Detail: fmt.Sprintf("(限定当前目录范围, 可选: %d 个)", len(candRepos)),
+		},
+		{
+			Key:    "2",
+			Label:  "从此分组移出仓库",
+			Detail: fmt.Sprintf("(全量: %d 个仓库)", len(groupRepos)),
+		},
+		{
+			Key:   "q",
+			Label: "[返回 / 取消]",
+		},
+	}
+
+	chosen, cancelled := selectMenu(ctx, title, "请选择操作 (编号 / q 取消): ", items)
+	if cancelled || chosen == nil || chosen.Key == "q" {
+		fmt.Println("已返回。")
+		return 0
+	}
+
+	switch chosen.Key {
+	case "1":
+		return addReposToGroupInScope(ctx, grpName, candRepos)
+	case "2":
+		return removeReposFromGroupInScope(ctx, grpName, groupRepos, inScopeRepos)
+	default:
+		return 0
+	}
+}
+
+// addReposToGroupInScope 将当前作用域内的候选仓库批量加入指定分组（支持多选）
+func addReposToGroupInScope(ctx *appCtx, grpName string, candRepos []*state.Repo) int {
+	if len(candRepos) == 0 {
+		fmt.Printf("当前目录范围内没有可加入分组 [%s] 的仓库（全部已属于该分组或本目录无仓库）。\n", grpName)
+		return 0
+	}
+
+	title := fmt.Sprintf("\n请选择要加入分组 [%s] 的仓库 (限定在当前目录范围内, 共 %d 个候选, 支持多选):", grpName, len(candRepos))
+	items := make([]pick.MenuItem, 0, len(candRepos))
+	for i, r := range candRepos {
+		detail := ""
+		if r.Group != "" {
+			detail = fmt.Sprintf("[当前属于: %s]", r.Group)
+		}
+		items = append(items, pick.MenuItem{
+			Key:    strconv.Itoa(i + 1),
+			Label:  r.Name,
+			Detail: detail,
+			Value:  r,
+		})
+	}
+
+	chosenItems, cancelled := selectMultiMenu(ctx, title, "请选择仓库编号 (空格或逗号分隔多选，输入 a 全选，q 取消): ", items)
+	if cancelled || len(chosenItems) == 0 {
+		fmt.Println("已取消。")
+		return 0
+	}
+
+	var targets []*state.Repo
+	var alreadyGrouped []*state.Repo
+	for _, it := range chosenItems {
+		if r, ok := it.Value.(*state.Repo); ok && r != nil {
+			targets = append(targets, r)
+			if r.Group != "" && !strings.EqualFold(r.Group, grpName) {
+				alreadyGrouped = append(alreadyGrouped, r)
+			}
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Println("未选择任何有效仓库。")
+		return 0
+	}
+
+	// 唯一性替换确认：若选中的仓库中有已属于其他分组的，提示确认
+	if len(alreadyGrouped) > 0 {
+		var msg string
+		if len(alreadyGrouped) == 1 {
+			msg = fmt.Sprintf("仓库 %s 当前属于 [%s]，确认变更为 [%s]? [y/N] ", alreadyGrouped[0].Name, alreadyGrouped[0].Group, grpName)
+		} else {
+			msg = fmt.Sprintf("选中的仓库中有 %d 个当前已属于其他分组（如 %s），确认将全部 %d 个仓库变更为 [%s]? [y/N] ",
+				len(alreadyGrouped), alreadyGrouped[0].Name, len(targets), grpName)
+		}
+		if !confirmPrompt(ctx, msg) {
+			fmt.Println("已取消。")
+			return 0
+		}
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	for _, r := range targets {
+		r.Group = grpName
+		r.ReviewedAt = now
+		state.Canonicalize(r)
+	}
+	ctx.state.AddGroup(grpName)
+	if err := ctx.state.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+		return 1
+	}
+	refreshCurrentScope(ctx)
+	if len(targets) == 1 {
+		fmt.Printf("已将 %s 加入分组: %s\n", targets[0].Name, grpName)
+	} else {
+		fmt.Printf("已将 %d 个仓库批量加入分组 [%s]:\n", len(targets), grpName)
+		for _, r := range targets {
+			fmt.Printf("  • %s\n", r.Name)
+		}
+	}
+	return 0
+}
+
+// removeReposFromGroupInScope 从指定分组中批量移出仓库（支持多选）。
+// 若组内存在超出当前目录范围的仓库，明确添加 [超出范围] 徽标并附带其路径信息予以区分显示。
+func removeReposFromGroupInScope(ctx *appCtx, grpName string, groupRepos []*state.Repo, inScopeRepos []*state.Repo) int {
+	if len(groupRepos) == 0 {
+		fmt.Printf("分组 [%s] 内当前没有任何仓库。\n", grpName)
+		return 0
+	}
+
+	sortedRepos := make([]*state.Repo, len(groupRepos))
+	copy(sortedRepos, groupRepos)
+	sort.SliceStable(sortedRepos, func(i, j int) bool {
+		inI := inPool(inScopeRepos, sortedRepos[i])
+		inJ := inPool(inScopeRepos, sortedRepos[j])
+		if inI != inJ {
+			return inI
+		}
+		return sortedRepos[i].Name < sortedRepos[j].Name
+	})
+
+	title := fmt.Sprintf("\n分组 [%s] 内的仓库 (共 %d 个, 支持多选):", grpName, len(sortedRepos))
+	items := make([]pick.MenuItem, 0, len(sortedRepos))
+	for i, r := range sortedRepos {
+		isIn := inPool(inScopeRepos, r)
+		badge := "[当前目录]"
+		detail := ""
+		if !isIn {
+			badge = "[超出范围]"
+			detail = fmt.Sprintf("(%s)", r.Path)
+		}
+		items = append(items, pick.MenuItem{
+			Key:    strconv.Itoa(i + 1),
+			Label:  r.Name,
+			Badge:  badge,
+			Detail: detail,
+			Value:  r,
+		})
+	}
+
+	chosenItems, cancelled := selectMultiMenu(ctx, title, "请选择要移出的仓库编号 (空格或逗号分隔多选，输入 a 全选，q 取消): ", items)
+	if cancelled || len(chosenItems) == 0 {
+		fmt.Println("已取消。")
+		return 0
+	}
+
+	var targets []*state.Repo
+	for _, it := range chosenItems {
+		if r, ok := it.Value.(*state.Repo); ok && r != nil {
+			targets = append(targets, r)
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Println("未选择任何有效仓库。")
+		return 0
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	for _, r := range targets {
+		r.Group = ""
+		r.ReviewedAt = now
+		state.Canonicalize(r)
+	}
+	if err := ctx.state.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+		return 1
+	}
+	refreshCurrentScope(ctx)
+	if len(targets) == 1 {
+		fmt.Printf("已将 %s 从分组 %s 移出。\n", targets[0].Name, grpName)
+	} else {
+		fmt.Printf("已将 %d 个仓库批量从分组 [%s] 移出:\n", len(targets), grpName)
+		for _, r := range targets {
+			fmt.Printf("  • %s\n", r.Name)
+		}
+	}
+	return 0
 }
 
 func cmdGroup(ctx *appCtx, a args) int {
@@ -2154,6 +2648,7 @@ func cmdGroup(ctx *appCtx, a args) int {
 				grpName := ctx.res.Scope.Segs[len(ctx.res.Scope.Segs)-1].Ident
 				return pickGroupActionInGroupScope(ctx, grpName)
 			}
+			return pickGroupActionInDirectoryScope(ctx)
 		}
 		return printAllGroupsWithHints(ctx)
 
@@ -3972,6 +4467,40 @@ var exportFilterKeys = []string{
 }
 
 func cmdExport(ctx *appCtx, a args) int {
+	isInteractive := isTerminal(os.Stdin) && !a.has("batch", "quiet")
+	hasExplicitParams := a.str("", "out", "o") != "" || a.str("", "format", "f") != "" || a.has("flat") || len(a.pos) > 0 || len(a.kv) > 0
+
+	// 裸敲 export 或指定 --wizard 且在终端交互环境下：启动交互式向导
+	if (!hasExplicitParams || a.has("wizard")) && isInteractive {
+		expCtx := &export.Context{
+			Home:     ctx.home,
+			Config:   ctx.cfg,
+			State:    ctx.state,
+			AllRepos: ctx.state.Repos,
+			ScopeRes: ctx.res,
+			Folded:   ctx.state.FoldedPaths(),
+		}
+		defaultOutDir := ctx.cfg.ResolvedExportDir(ctx.home)
+		res, err := export.RunWizard(expCtx, defaultOutDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "向导导出失败: %v\n", err)
+			return 1
+		}
+		if res == nil {
+			fmt.Println("已取消导出。")
+			return 0
+		}
+		fmt.Println()
+		fmt.Printf("✓ 导出完成！共生成 %d 个文件到批次目录:\n  %s\n", len(res.Files), res.BatchDir)
+		for _, f := range res.Files {
+			fmt.Printf("  • %s\n", filepath.Base(f))
+		}
+		if ctx.cfg.ShouldAutoOpenExport() {
+			fmt.Println("已自动调用资源管理器打开目标文件夹。")
+		}
+		return 0
+	}
+
 	fkv := map[string]string{"all": "true"} // 以全集为基底
 	for _, k := range exportFilterKeys {
 		if v, ok := a.kv[k]; ok {
@@ -4068,6 +4597,12 @@ func cmdTriage(ctx *appCtx, a args) int {
 // ---------------------------------------------------------------- config
 
 func cmdConfig(ctx *appCtx, a args) int {
+	isInteractive := isTerminal(os.Stdin) && !a.has("batch", "quiet")
+	// 裸敲 config 或指定 wizard 且在交互终端中：进入交互式配置管理中心
+	if (len(a.pos) == 0 || a.has("wizard", "menu", "ui")) && isInteractive {
+		return configInteractive(ctx)
+	}
+
 	sub := "show"
 	if len(a.pos) > 0 {
 		sub = strings.ToLower(a.pos[0])
@@ -4075,6 +4610,8 @@ func cmdConfig(ctx *appCtx, a args) int {
 	switch sub {
 	case "show":
 		return configShow(ctx)
+	case "wizard", "menu", "ui":
+		return configInteractive(ctx)
 	case "init":
 		return configInit(ctx, a)
 	case "discover":
@@ -4092,6 +4629,309 @@ func cmdConfig(ctx *appCtx, a args) int {
 	default:
 		fmt.Fprintf(os.Stderr, "未知配置命令: %s\n", sub)
 		return 2
+	}
+}
+
+func configInteractive(ctx *appCtx) int {
+	sc := bufio.NewScanner(os.Stdin)
+	readLine := func(prompt string) string {
+		fmt.Print(prompt)
+		if !sc.Scan() {
+			return ""
+		}
+		return strings.TrimSpace(sc.Text())
+	}
+
+	for {
+		fmt.Println()
+		fmt.Println("╔═══════════════════════════════════════════════════════════════════╗")
+		fmt.Println("║                      igit 配置管理中心 (Interactive)              ║")
+		fmt.Println("╚═══════════════════════════════════════════════════════════════════╝")
+		fmt.Printf("配置文件: %s\n\n", ctx.cfgPath)
+
+		rootDesc := fmt.Sprintf("%d 个根目录", len(ctx.cfg.Roots))
+		exportDesc := fmt.Sprintf("自动打开: %v", ctx.cfg.ShouldAutoOpenExport())
+		perfDesc := fmt.Sprintf("并发 %d, 深度 %d, fast=%v", ctx.cfg.Jobs, ctx.cfg.MaxDepth, ctx.cfg.Fast)
+		excludeDesc := fmt.Sprintf("%d 个跳过项", len(ctx.cfg.ExcludeNames))
+
+		fmt.Printf("  [1] 📂 扫描根目录管理     (%s)\n", rootDesc)
+		fmt.Printf("  [2] 📦 报告导出设置       (%s)\n", exportDesc)
+		fmt.Printf("  [3] ⚡ 性能与扫描深度     (%s)\n", perfDesc)
+		fmt.Printf("  [4] 🚫 排除目录过滤管理   (%s)\n", excludeDesc)
+		fmt.Printf("  [5] 🔍 智能探测推荐目录   (粗扫磁盘发现高频代码目录并交互勾选)\n")
+		fmt.Printf("  [6] 📝 在外部编辑器中打开 (直接编辑 config.json 纯文本)\n")
+		fmt.Println("  [0] 保存并退出配置中心")
+		fmt.Println()
+
+		choice := readLine("请输入选项编号 [0-6] (回车退出): ")
+		if choice == "" || choice == "0" || choice == "q" || choice == "exit" {
+			fmt.Println("已退出配置中心。")
+			return 0
+		}
+
+		switch choice {
+		case "1":
+			configInteractiveRoots(ctx, readLine)
+		case "2":
+			configInteractiveExport(ctx, readLine)
+		case "3":
+			configInteractivePerf(ctx, readLine)
+		case "4":
+			configInteractiveExcludes(ctx, readLine)
+		case "5":
+			configInteractiveDiscover(ctx, readLine)
+		case "6":
+			configOpenInEditor(ctx)
+		default:
+			fmt.Println("无效选项，请输入 0 到 6 之间的数字。")
+		}
+	}
+}
+
+func configInteractiveRoots(ctx *appCtx, readLine func(string) string) {
+	for {
+		fmt.Println("\n--- 📂 扫描根目录管理 ---")
+		if len(ctx.cfg.Roots) == 0 {
+			fmt.Println("  (当前未配置任何扫描根目录)")
+		} else {
+			for i, r := range ctx.cfg.Roots {
+				fmt.Printf("  [%d] %s\n", i+1, r)
+			}
+		}
+		fmt.Println()
+		fmt.Println("  [+] 输入目录路径直接添加 (例如 D:\\code)")
+		fmt.Println("  [-] 输入编号直接移除 (例如 2 或 -2)")
+		fmt.Println("  [0] 返回上级菜单")
+		in := readLine("请输入: ")
+		if in == "" || in == "0" || in == "q" {
+			return
+		}
+		trim := strings.TrimPrefix(in, "-")
+		if idx, err := strconv.Atoi(trim); err == nil && idx >= 1 && idx <= len(ctx.cfg.Roots) {
+			target := ctx.cfg.Roots[idx-1]
+			config.RemoveRoot(ctx.cfg, target)
+			_ = config.Save(ctx.cfgPath, ctx.cfg)
+			fmt.Printf("✓ 已移除扫描根: %s\n", target)
+			continue
+		}
+		path := strings.TrimPrefix(in, "+")
+		path = strings.TrimSpace(path)
+		path = strings.Trim(path, "\"")
+		if path != "" {
+			changed, abs := config.AddRoot(ctx.cfg, path)
+			if changed {
+				_ = config.Save(ctx.cfgPath, ctx.cfg)
+				fmt.Printf("✓ 已添加扫描根: %s\n", abs)
+			} else {
+				fmt.Printf("没有变化（可能已存在或路径无效）: %s\n", abs)
+			}
+		}
+	}
+}
+
+func configInteractiveExport(ctx *appCtx, readLine func(string) string) {
+	for {
+		fmt.Println("\n--- 📦 报告导出设置 ---")
+		fmt.Printf("  当前导出目录:   %s\n", ctx.cfg.ResolvedExportDir(ctx.home))
+		fmt.Printf("  导出后自动打开: %v\n", ctx.cfg.ShouldAutoOpenExport())
+		fmt.Println()
+		fmt.Println("  [1] 切换导出后是否自动打开 (当前: " + fmt.Sprintf("%v", ctx.cfg.ShouldAutoOpenExport()) + ")")
+		fmt.Println("  [2] 修改导出目标存储目录")
+		fmt.Println("  [0] 返回上级菜单")
+		in := readLine("请输入选项 [0-2]: ")
+		if in == "" || in == "0" || in == "q" {
+			return
+		}
+		switch in {
+		case "1":
+			curr := ctx.cfg.ShouldAutoOpenExport()
+			next := !curr
+			ctx.cfg.AutoOpenExport = &next
+			_ = config.Save(ctx.cfgPath, ctx.cfg)
+			fmt.Printf("✓ 导出自动打开已更新为: %v\n", next)
+		case "2":
+			p := readLine("请输入新的导出根目录绝对路径 (回车取消): ")
+			p = strings.TrimSpace(strings.Trim(p, "\""))
+			if p != "" {
+				ctx.cfg.ExportDir = p
+				_ = config.Save(ctx.cfgPath, ctx.cfg)
+				fmt.Printf("✓ 导出存储目录已更新为: %s\n", p)
+			}
+		}
+	}
+}
+
+func configInteractivePerf(ctx *appCtx, readLine func(string) string) {
+	for {
+		fmt.Println("\n--- ⚡ 性能与扫描深度 ---")
+		fmt.Printf("  并发工作数 (Jobs):  %d\n", ctx.cfg.Jobs)
+		fmt.Printf("  最大扫描深度 (Depth): %d\n", ctx.cfg.MaxDepth)
+		fmt.Printf("  快速扫描模式 (Fast):  %v\n", ctx.cfg.Fast)
+		fmt.Printf("  深度检测模式 (Deep):  %v\n", ctx.cfg.Deep)
+		fmt.Println()
+		fmt.Println("  [1] 修改并发工作数 (建议 4~16)")
+		fmt.Println("  [2] 修改最大扫描深度 (建议 5~15)")
+		fmt.Println("  [3] 切换快速模式 Fast (仅扫元数据，不读 git 状态)")
+		fmt.Println("  [4] 切换深度模式 Deep (检测大文件与历史体积)")
+		fmt.Println("  [0] 返回上级菜单")
+		in := readLine("请输入选项 [0-4]: ")
+		if in == "" || in == "0" || in == "q" {
+			return
+		}
+		switch in {
+		case "1":
+			v := readLine(fmt.Sprintf("输入新的并发数 (当前 %d): ", ctx.cfg.Jobs))
+			if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 64 {
+				ctx.cfg.Jobs = n
+				_ = config.Save(ctx.cfgPath, ctx.cfg)
+				fmt.Printf("✓ 并发数已更新为: %d\n", n)
+			}
+		case "2":
+			v := readLine(fmt.Sprintf("输入新的最大深度 (当前 %d): ", ctx.cfg.MaxDepth))
+			if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 30 {
+				ctx.cfg.MaxDepth = n
+				_ = config.Save(ctx.cfgPath, ctx.cfg)
+				fmt.Printf("✓ 最大深度已更新为: %d\n", n)
+			}
+		case "3":
+			ctx.cfg.Fast = !ctx.cfg.Fast
+			_ = config.Save(ctx.cfgPath, ctx.cfg)
+			fmt.Printf("✓ Fast 模式已更新为: %v\n", ctx.cfg.Fast)
+		case "4":
+			ctx.cfg.Deep = !ctx.cfg.Deep
+			_ = config.Save(ctx.cfgPath, ctx.cfg)
+			fmt.Printf("✓ Deep 模式已更新为: %v\n", ctx.cfg.Deep)
+		}
+	}
+}
+
+func configInteractiveExcludes(ctx *appCtx, readLine func(string) string) {
+	for {
+		fmt.Println("\n--- 🚫 排除目录过滤管理 ---")
+		fmt.Println("当前跳过的目录名:")
+		for i, n := range ctx.cfg.ExcludeNames {
+			fmt.Printf("  [%2d] %s\n", i+1, n)
+		}
+		fmt.Println()
+		fmt.Println("  [+] 输入名称添加排除项 (例如 target)")
+		fmt.Println("  [-] 输入编号移除排除项 (例如 3 或 -3)")
+		fmt.Println("  [0] 返回上级菜单")
+		in := readLine("请输入: ")
+		if in == "" || in == "0" || in == "q" {
+			return
+		}
+		trim := strings.TrimPrefix(in, "-")
+		if idx, err := strconv.Atoi(trim); err == nil && idx >= 1 && idx <= len(ctx.cfg.ExcludeNames) {
+			removed := ctx.cfg.ExcludeNames[idx-1]
+			ctx.cfg.ExcludeNames = append(ctx.cfg.ExcludeNames[:idx-1], ctx.cfg.ExcludeNames[idx:]...)
+			_ = config.Save(ctx.cfgPath, ctx.cfg)
+			fmt.Printf("✓ 已移除排除项: %s\n", removed)
+			continue
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(in, "+"))
+		if name != "" {
+			ctx.cfg.ExcludeNames = append(ctx.cfg.ExcludeNames, name)
+			_ = config.Save(ctx.cfgPath, ctx.cfg)
+			fmt.Printf("✓ 已添加排除项: %s\n", name)
+		}
+	}
+}
+
+func configInteractiveDiscover(ctx *appCtx, readLine func(string) string) {
+	fmt.Println("\n正在粗扫各盘顶层，探测包含 Git 仓库的高频目录...")
+	driveRoots := fixedDrives()
+	driveRoots = normalizeRoots(driveRoots)
+	if len(driveRoots) == 0 {
+		fmt.Println("未找到可用磁盘。")
+		return
+	}
+	res, err := scan.Run(scan.Options{
+		Roots:        driveRoots,
+		ExcludeNames: ctx.cfg.ExcludeNames,
+		ExcludePaths: ctx.cfg.ExcludePaths,
+		MaxDepth:     4,
+		Jobs:         ctx.cfg.Jobs,
+		Fast:         true,
+		GitExe:       ctx.cfg.GitExe,
+	})
+	if err != nil || len(res.Repos) == 0 {
+		fmt.Println("粗扫未发现集中仓库。")
+		return
+	}
+
+	type agg struct {
+		root string
+		n    int
+	}
+	buckets := map[string]int{}
+	for _, r := range res.Repos {
+		key := ancestorUnder(driveRoots, r.Path, 3)
+		buckets[key]++
+	}
+	var rows []agg
+	for k, v := range buckets {
+		rows = append(rows, agg{k, v})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].n != rows[j].n {
+			return rows[i].n > rows[j].n
+		}
+		return rows[i].root < rows[j].root
+	})
+
+	limit := 15
+	if len(rows) < limit {
+		limit = len(rows)
+	}
+	fmt.Printf("\n探测到 %d 个仓库，以下是仓库最集中的目录:\n\n", len(res.Repos))
+	for i := 0; i < limit; i++ {
+		fmt.Printf("  [%2d] 包含 %3d 个仓库: %s\n", i+1, rows[i].n, rows[i].root)
+	}
+	fmt.Println()
+	in := readLine("输入要添加为扫描根的编号 (如 1 或 1,2 或 a 全选，回车跳过): ")
+	if in == "" || in == "0" {
+		return
+	}
+	added := 0
+	if strings.ToLower(in) == "a" {
+		for i := 0; i < limit; i++ {
+			if ok, _ := config.AddRoot(ctx.cfg, rows[i].root); ok {
+				added++
+			}
+		}
+	} else {
+		for _, part := range strings.Split(in, ",") {
+			part = strings.TrimSpace(part)
+			if idx, err := strconv.Atoi(part); err == nil && idx >= 1 && idx <= limit {
+				if ok, _ := config.AddRoot(ctx.cfg, rows[idx-1].root); ok {
+					added++
+				}
+			}
+		}
+	}
+	if added > 0 {
+		_ = config.Save(ctx.cfgPath, ctx.cfg)
+		fmt.Printf("✓ 成功添加 %d 个扫描根目录！\n", added)
+	} else {
+		fmt.Println("未添加任何目录。")
+	}
+}
+
+func configOpenInEditor(ctx *appCtx) {
+	fmt.Printf("正在打开配置文件: %s\n", ctx.cfgPath)
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", ctx.cfgPath)
+	case "darwin":
+		cmd = exec.Command("open", ctx.cfgPath)
+	default:
+		cmd = exec.Command("xdg-open", ctx.cfgPath)
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Printf("打开失败: %v\n", err)
+	} else {
+		fmt.Println("✓ 已在系统默认编辑器中拉起配置文件。")
 	}
 }
 
@@ -4135,6 +4975,8 @@ func configShow(ctx *appCtx) int {
 	if ctx.cfg.TermCmd != "" {
 		fmt.Printf("终端命令模板: %s\n", ctx.cfg.TermCmd)
 	}
+	fmt.Printf("导出存储目录: %s\n", ctx.cfg.ResolvedExportDir(ctx.home))
+	fmt.Printf("导出自动打开: %v\n", ctx.cfg.ShouldAutoOpenExport())
 	return 0
 }
 
@@ -4246,6 +5088,11 @@ func configSet(ctx *appCtx, a args) int {
 			ctx.cfg.TigExe = v
 		case "term_cmd", "term":
 			ctx.cfg.TermCmd = v
+		case "export_dir", "exportdir":
+			ctx.cfg.ExportDir = v
+		case "auto_open_export", "auto_open":
+			b := v == "true" || v == "1" || v == "yes"
+			ctx.cfg.AutoOpenExport = &b
 		case "root":
 			config.AddRoot(ctx.cfg, v)
 		default:

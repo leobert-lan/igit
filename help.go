@@ -144,26 +144,24 @@ const helpTopicRulesText = `[专题] 目录级过滤与折叠规则 (igit help r
 
 const helpTopicConfigText = `[专题] 系统配置与扫描根设置 (igit help config)
 
-管理扫描范围与全局运行参数:
+核心准则: 如非必要，不使用复杂命令参数，选项交互永远是第一优先级！
 
-配置命令:
-  config show          查看当前配置参数与数据目录路径
-  config init          重建默认配置
-  config discover      自动探查系统各盘符，推荐可能含仓库的目录
+推荐用法:
+  config                直接进入交互式配置管理中心 (推荐，零记忆成本)
+
+交互功能:
+  • 📂 扫描根目录管理     (交互式查看、添加、编号移除扫描根)
+  • 📦 报告导出设置       (修改导出目录、切换导出后自动打开)
+  • ⚡ 性能与扫描深度     (交互式修改并发数、深度、Fast/Deep 模式)
+  • 🚫 排除目录过滤管理   (交互式增删跳过的目录名)
+  • 🔍 智能探测推荐目录   (粗扫磁盘发现高频代码目录并交互勾选)
+  • 📝 在外部编辑器中打开 (直接拉起默认编辑器修改 config.json)
+
+脚本/无头参数兼容 (CI/CD 自动化):
+  config show           非交互打印当前配置参数
   config add-root <dir> 添加扫描根目录
   config rm-root <dir>  移除扫描根目录
-  config add-exclude <n>添加跳过的目录名 (支持 * 通配)
-  config rm-exclude <n> 移除跳过的目录名
-  config set k=v       直接修改配置参数
-
-可配置参数 (config set k=v):
-  jobs=N               并发扫描协程数
-  max-depth=N          扫描最大下钻深度
-  fast=true|false      快速模式 (只读 .git，不调 git，速度极快)
-  deep=true|false      命中仓库后仍继续向下递归扫描
-  git-exe=<path>       git 命令路径
-  tig-exe=<path>       tig 命令路径
-  term-cmd=<cmd>       终端启动命令模板 ({dir} {cmd})`
+  config set k=v        命令行键值设置 (如 jobs=8 max-depth=10 export_dir=...)`
 
 var commandHelps = map[string]string{
 	"scan": `igit scan - 扫描配置的根目录并更新状态
@@ -228,16 +226,19 @@ var commandHelps = map[string]string{
   进入全屏交互整理面板，支持逐个判别仓库、快速分组、打标签与归档。
   在面板中按 'g' 键可直接在外部唤起 tig 检视当前仓库。`,
 
-	"export": `igit export - 导出仓库清单报告
+	"export": `igit export - 导出数据资产与健康治理报告
 
 用法:
-  igit export --format=md|outline|csv|json [-o <输出文件>]
+  igit export                    启动交互式向导，多选导出内容并自动打开文件夹 (推荐，免记指令)
+  igit export --format=md|outline|csv|json [-o <输出文件>]  单文件输出 (脚本/管道兼容)
 
-格式说明:
-  md             按目录分节的 Markdown 报告 (概览 + 需关注分类 + 明细)
-  outline        只有目录树骨架，看清分布格局
-  csv            带 BOM 的 CSV 文件，Excel 直接双击打开
-  json           原始结构化数据，供下游脚本或工具处理`,
+报告分文件说明:
+  00_orphans_todo.md   游离仓库待整理地图 (依物理父目录聚合，评估风险，指导去哪整理)
+  01_global_summary.md 全局资产与健康统计总览 (健康大盘、Group/Tag 看板)
+  02_global_tree.md    全局物理目录树与路径清单 (层级骨架与路径对照)
+  03_scope_*.md        当前作用域专项深度报告 (根据 Group/Tag/Dir/Repo 动态生成)
+  repos.csv            全量资产表格 (带 UTF-8 BOM，Excel 双击即看)
+  repos.json           完整机器可读备份数据`,
 
 	"group": `igit group - 管理仓库分组 (单仓至多归属一个分组)
 
@@ -319,10 +320,10 @@ var commandHelps = map[string]string{
 用法:
   igit prune           扫描清理磁盘上物理文件已不存在且未被忽略的残留记录`,
 
-	"dirs": helpTopicRulesText,
-	"hide": helpTopicRulesText,
+	"dirs":   helpTopicRulesText,
+	"hide":   helpTopicRulesText,
 	"unhide": helpTopicRulesText,
-	"fold": helpTopicRulesText,
+	"fold":   helpTopicRulesText,
 	"unfold": helpTopicRulesText,
 	"config": helpTopicConfigText,
 

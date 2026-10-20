@@ -31,6 +31,32 @@ type Config struct {
 
 	// HostUsers：域名到默认 HTTPS 用户名的映射记忆（例如 gitlab.corp.com -> zhangsan）
 	HostUsers map[string]string `json:"host_users,omitempty"`
+
+	// ExportDir：导出文件的目标存储目录，留空默认为数据目录下的 exports
+	ExportDir string `json:"export_dir,omitempty"`
+	// AutoOpenExport：导出后是否自动打开目标目录，默认 true
+	AutoOpenExport *bool `json:"auto_open_export,omitempty"`
+}
+
+func (c *Config) ShouldAutoOpenExport() bool {
+	if c == nil || c.AutoOpenExport == nil {
+		return true
+	}
+	return *c.AutoOpenExport
+}
+
+func (c *Config) ResolvedExportDir(home string) string {
+	if c != nil && strings.TrimSpace(c.ExportDir) != "" {
+		return c.ExportDir
+	}
+	if home != "" {
+		return filepath.Join(home, "exports")
+	}
+	h, err := os.UserHomeDir()
+	if err == nil {
+		return filepath.Join(h, ".igit", "exports")
+	}
+	return "exports"
 }
 
 // DefaultExcludeNames 默认跳过的噪音目录名（命中即不再下钻）。

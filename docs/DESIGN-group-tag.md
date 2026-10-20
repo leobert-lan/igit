@@ -1,8 +1,8 @@
 # Group 与 Tag 交互模型设计规范 (Living Spec)
 
 > **【定位：永驻设计规范 / Living Spec】**  
-> **更新日期**：2026-10-12  
-> **关联代码**：[`main.go`](file:///c:/Users/Lenovo/WorkBuddy/scan_git/main.go)（`cmdGroup`, `cmdTag`, `pickGroupForRepo`）, [`internal/state/state.go`](file:///c:/Users/Lenovo/WorkBuddy/scan_git/internal/state/state.go)
+> **更新日期**：2026-10-19  
+> **关联代码**：[`main.go`](file:///c:/Users/Lenovo/WorkBuddy/scan_git/main.go)（`cmdGroup`, `pickGroupActionInDirectoryScope`, `cmdTag`, `pickGroupForRepo`）, [`internal/pick/menu.go`](file:///c:/Users/Lenovo/WorkBuddy/scan_git/internal/pick/menu.go), [`internal/state/state.go`](file:///c:/Users/Lenovo/WorkBuddy/scan_git/internal/state/state.go)
 
 ---
 
@@ -13,8 +13,8 @@
 2. **打字成本高**：在深度嵌套的 REPL 作用域中，全量敲击 `group set <仓库名> <分组名>` 繁琐且容易输错。
 
 ### 核心解法
-- **Scope 隐式推断宾语**：站在不同作用域，系统自动推断操作对象（单仓/当前组/全局）；
-- **交互式选项回退（Picker Fallback）**：意图明确而参数未满时，不抛语法错误，就地输出编号选项菜单；
+- **Scope 隐式推断宾语**：站在不同作用域，系统自动推断操作对象（单仓/当前组/全局/目录文件树）；
+- **交互式选项回退（Picker Fallback & Menu）**：意图明确而参数未满时，不抛语法错误也不仅打印被动文本提示，就地输出编号与方向键支持的交互式向导；
 - **排他性与宽松性区分治理**：
   - **Group 是 $N:1$（单一互斥归属）**：仓库至多属于一个 Group。替换已有 Group 时必须**二次确认**；
   - **Tag 是 $N:M$（自由多重标记）**：支持多选、追加与摘除，语义更加宽松。
@@ -31,6 +31,7 @@
 | **分组作用域** (`group:<组名>`) | `group` | 当前分组 `Ident` | 弹出当前分组管理菜单（移出仓库 / 添加仓库 / 列出所有分组） |
 | **分组作用域** | `group rm` / `group clear` | 当前分组内的仓库列表 | 弹出**组内仓库编号菜单**，用户输入序号即可移出该仓库 |
 | **分组作用域** | `group add <kw>` | 外部目标仓库 | 将目标仓库加入当前分组（若已有组则提示替换确认） |
+| **目录 / 根作用域** (`/` 或 `file:...`) | `group` | 当前作用域内的分组与仓库 | 弹出**目录作用域交互式分组管理向导**（支持方向键与数值选项：新建分组、为选定分组增加/移出仓库，增加严格限定在当前 file scope 内，移出时对超出目录范围的仓库打标区分显示） |
 | **目录 / 根作用域** (`/` 或 `file:...`) | `group <仓库名>` | 命中的目标仓库 | 识别出仓库后，自动打开该仓库的**分组编号选择菜单** |
 | **目录 / 根作用域** | `group set <仓库名>` | 命中的目标仓库 | 同上，打开分组选择菜单（不报错缺少参数） |
 | **目录 / 根作用域** | `group set <仓> <组>` | 目标仓库与目标分组 | 执行设置；若仓库已有其他分组且未带 `-y`，弹出替换确认 |
@@ -77,6 +78,56 @@
 请选择要移出的仓库 (序号 / q 取消): 2
 -> 已将 compiler-demo 从分组 study 移出。
 ```
+
+### 3.4 目录与全集作用域下的交互式分组管理原型 (`pickGroupActionInDirectoryScope`)
+
+当用户处于目录 (`file:...`) 或根 (`/`) 作用域敲击 `group` 时，不再退化为静态文本提示，而是展开强约束、可操作的交互式分组向导（支持 `↑/↓/j/k` 方向键光标移动、数值/快捷键快速命中、`Enter` 确认与 `q` 取消）：
+
+#### 第一层：分组挑选与新建
+```text
+分组管理 (当前作用域: file:C:\Users\Lenovo\WorkBuddy · 1 个仓库):
+ >  1) Job_Hide   (全量: 0 个仓库, 本作用域: 0 个)
+    2) job        (全量: 1 个仓库, 本作用域: 1 个)
+    3) leobert    (全量: 4 个仓库, 本作用域: 0 个)
+    4) study      (全量: 0 个仓库, 本作用域: 0 个)
+    +) [新建分组...]
+    q) [取消]
+
+  [↑/↓ 或 j/k] 移动光标  [编号/快捷键] 直接选择  [Enter] 确认  [q] 取消
+```
+
+#### 第二层：选定分组操作菜单
+```text
+分组: job (全量: 1 个仓库, 本作用域内: 1 个)
+ >  1) 添加仓库到此分组 (限定当前目录范围, 可选: 0 个)
+    2) 从此分组移出仓库 (全量: 1 个仓库)
+    q) [返回 / 取消]
+```
+
+#### 第三层 A：添加仓库（严格限定在当前 file scope 内，支持多选）
+```text
+请选择要加入分组 [leobert] 的仓库 (限定在当前目录范围内, 共 3 个候选, 支持多选):
+ >  1) [√] scan_git [当前属于: job]
+    2) [√] repo-core
+    3) [ ] repo-demo
+
+  [↑/↓ 或 j/k] 移动  [空格/编号] 勾选/取消  [a] 全选  [Enter] 确认 (2 个已选)  [q] 取消
+```
+> - 若勾选的仓库中存在已归属其他分组的仓库，遵循 **3.2 唯一性替换确认契约**（弹出二次确认提示 `[y/N]`）；
+> - 终端回退/脚本模式下，支持输入 `1 2` 或 `1, 2` 或 `a` 全选。
+
+#### 第三层 B：移出仓库（超出目录范围严格标记区分显示，支持多选）
+```text
+分组 [leobert] 内的仓库 (共 4 个, 支持多选):
+ >  1) [√] [当前目录] scan_git
+    2) [ ] [超出范围] other-algo (D:\projects\other-algo)
+    3) [√] [超出范围] core-lib (E:\libs\core-lib)
+    4) [ ] [超出范围] cli-tool (F:\tools\cli-tool)
+
+  [↑/↓ 或 j/k] 移动  [空格/编号] 勾选/取消  [a] 全选  [Enter] 确认 (2 个已选)  [q] 取消
+```
+> - 组内属于当前作用域内的仓库排在最前并标以 `[当前目录]`；超出当前作用域的仓库标以 `[超出范围]` 并附加其绝对路径；
+> - 支持批量勾选后一键批量移出。
 
 ---
 
@@ -137,11 +188,13 @@ Priority 3: NodeGroup (分组作用域 group:xxx)
     │  └─ group        -> pickGroupActionInGroupScope
     ▼
 Priority 4: NodeDir (目录作用域 file:xxx)
-    │  ├─ group/tag    -> 全局/目录视角（提示或指定仓库语法）
+    │  ├─ group        -> pickGroupActionInDirectoryScope (目录作用域交互式分组管理向导)
+    │  ├─ tag          -> 全局/目录视角（提示或指定仓库语法）
     │  └─ hide/fold .  -> 隐藏/折叠当前目录
     ▼
 Priority 5: NodeRoot (全局根目录 /)
-       └─ group/tag    -> 列出全集元数据统计与操作引导指南
+    │  ├─ group        -> pickGroupActionInDirectoryScope (全局交互式分组管理向导)
+    └─ tag             -> 列出全集元数据统计与操作引导指南
 ```
 
 ---

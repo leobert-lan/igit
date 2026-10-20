@@ -419,6 +419,11 @@ igit dirs                                       :: 看看现在设了什么
 ```
 
 - **相对路径按当前位置解析**：在 `file:D:\repos` 下敲 `hide ryxl_rd` 等于 `hide D:\repos\ryxl_rd`。
+- **hide 的资产不计入游离待办**：在数据导出中，被隐藏的区域作为静默免打扰资产单独统计（显示已知数量或未测算），绝不作为未治理待办骚扰你。
+- **支持任意 CD 进隐藏区域审视**：
+  - 用户可随时敲 `cd D:\repos\ryxl_rd`（或任意盘符绝对路径）走进已隐藏目录；
+  - 提示符会标明 `(已隐藏)`，但允许敲 `ls`、`tree`、`list`、`stats` 自由下钻看清里面客观存在什么；
+  - 若看清后决定解除隐藏，直接在当前目录下敲一句 `unhide`（或 `unhide .`）即可原地解封恢复日常大盘。
 - 如果这条规则盖住 0 个仓库，**不会保存**，避免手滑输错留下无效规则。
 - 规则保存在 `~/.igit/state.json` 中，后续新克隆进该目录的仓库自动生效。
 
@@ -468,51 +473,65 @@ igit stats
 
 ## 10. 导出：export
 
+> **核心交互原则**：**如非必要，不使用复杂命令参数，选项交互永远是第一优先级！**  
+> 用户无需成为繁杂命令记忆的专家。在终端中裸敲 `igit export` 会自动拉起交互向导，按 `Enter` 即可完成默认导出并自动在资源管理器中打开。
+
+### 10.1 交互向导导出（推荐，日常首选）
+
 ```cmd
-igit export --format=md      -o repos.md    :: Markdown 报告（默认）
-igit export --format=outline -o tree.md     :: 只有目录树骨架
-igit export --format=csv     -o repos.csv   :: 带 BOM，Excel 直接打开
-igit export --format=json    -o repos.json  :: 原始结构化数据
-igit export --format=md --flat -o table.md  :: 平铺表格
+igit export
 ```
+*   **零记忆成本**：终端弹出复选框菜单，支持 `↑/↓` 移动、`空格` 勾选/取消、`a` 全选/全不选、`Enter` 确认导出、`Esc/q` 取消。
+*   **一键通过**：默认勾选最核心的报告组合，敲回车 0.5 秒即可完成。
+*   **自动打开**：导出完成后，自动调用系统资源管理器弹窗打开生成的批次文件夹（`exports/export_YYYY-MM-DD_HHMMSS/`）。
 
-不给 `-o` 就打印到标准输出，可接管道处理：`igit export --format=json | jq ...`
+#### 模块化报告文件说明
+1.  **`00_orphans_todo.md`**：**游离仓库待整理地图**。按物理父目录聚合未分组/未打标资产，评估改动与丢失风险，按聚集度排行，指导用户“下一步去哪个目录下进行集中整理”。
+2.  **`01_global_summary.md`**：**全局资产与健康统计总览**。健康大盘（脏/超前/落后/无远程/缺失）、Group 矩阵、Tag 矩阵看板。
+3.  **`02_global_tree.md`**：**全局物理目录树与路径清单**。层级树状骨架与完整物理绝对路径映射表。
+4.  **`03_scope_*.md`**：**当前作用域专属深度报告**。根据当前所在的 Group、Tag、Dir 或 Repo 动态生成定制化体检档案。
+5.  **`repos.csv`**：（可选勾选）全量资产明细表，带 UTF-8 BOM，Excel 双击即看无乱码。
+6.  **`repos.json`**：（可选勾选）完整机器可读备份数据。
 
-### Markdown 报告构成
-1. **概览** —— 状态汇总、分组分布。
-2. **值得先看** —— 挑出重点关注项：磁盘丢失、未提交改动、未推送提交、无远端、一年未提交。
-3. **按目录分节** —— 目录骨架 + 各目录明细表格。
+### 10.2 传统单文件与管道输出（无头脚本兼容）
 
-### 导出部分内容
-带过滤参数就只导出对应的那一批：
+用于脚本自动化、CI/CD 或输出重定向：
 
 ```cmd
-igit export --dirty      -o 未提交改动.md
-igit export --no-remote  -o 纯本地.md
-igit export --unpushed   -o 未推送.md
-igit export --query=ryxl -o ryxl.md
+igit export --format=md      -o repos.md    :: Markdown 报告
+igit export --format=outline -o tree.md     :: 只有目录树骨架
+igit export --format=csv     -o repos.csv   :: 带 BOM 的 CSV
+igit export --format=json    -o repos.json  :: 原始结构化数据
+igit export --format=json | jq ...          :: 标准输出管道处理
 ```
 
 ---
 
 ## 11. 配置：config
 
-```cmd
-igit config show               :: 查看当前配置与数据目录位置
-igit config init               :: 重建默认配置
-igit config discover           :: 探查各盘，推荐含仓库的目录
-igit config add-root D:\repos  :: 添加扫描根目录
-igit config rm-root  D:\repos  :: 移除扫描根目录
-igit config add-exclude node_modules :: 添加排除目录名
-igit config rm-exclude AppData       :: 移除排除目录名
-igit config set jobs=24 max-depth=6 fast=true :: 修改配置参数
-```
+> **核心交互原则**：**如非必要，不使用复杂命令参数，选项交互永远是第一优先级！**  
+> 无需记忆 `add-root`、`rm-root`、`set jobs=...` 等一长串参数。直接运行 `igit config` 即可进入全功能交互式配置管理中心。
 
-### discover：不知道仓库散在哪时用
+### 11.1 交互式配置管理中心（推荐，日常首选）
+
 ```cmd
-igit config discover                       :: 只看两层，推荐候选目录
-igit config discover --max-depth=3         :: 挖深一层
-igit config discover --apply --min=2       :: 仓库数 >= 2 的目录自动加进扫描根
+igit config
+```
+弹出整洁的配置主菜单，输入编号即可完成所有配置管理：
+*   **[1] 📂 扫描根目录管理**：交互式列出已配置的根目录，支持直接输入路径添加、按编号快速移除；
+*   **[2] 📦 报告导出设置**：一键切换导出后是否自动打开文件夹、修改导出保存的默认根目录；
+*   **[3] ⚡ 性能与扫描深度**：交互式调整并发协程数（Jobs）、最大深度（MaxDepth）、快速模式（Fast）与深度模式（Deep）；
+*   **[4] 🚫 排除目录过滤管理**：交互式增删跳过的目录名（如 target、build 等）；
+*   **[5] 🔍 智能探测推荐目录**：粗扫磁盘高频代码目录，交互式输入编号或 `a` 全选批量加入扫描根；
+*   **[6] 📝 在外部编辑器中打开**：一键在系统默认文本编辑器中拉起 `config.json` 纯文本，随心编辑保存。
+
+### 11.2 脚本与自动化命令行（CI/CD 无头兼容）
+
+```cmd
+igit config show               :: 非交互打印当前配置与数据目录位置
+igit config add-root D:\repos  :: 命令行添加扫描根目录
+igit config rm-root  D:\repos  :: 命令行移除扫描根目录
+igit config set jobs=24 max-depth=6 fast=true :: 命令行修改配置参数
 ```
 
 ### 配置文件位置

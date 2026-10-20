@@ -809,6 +809,250 @@ func TestCmdLsDisplaysGroupAndTags(t *testing.T) {
 	}
 }
 
+func TestCmdGroupInDirectoryScope_AddRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
+	workDir := filepath.Join(tmpDir, "workDir")
+	otherDir := filepath.Join(tmpDir, "otherDir")
+	p1 := filepath.Join(workDir, "repo-1")
+	p2 := filepath.Join(workDir, "repo-2")
+	p3 := filepath.Join(otherDir, "repo-external")
 
+	r1 := &state.Repo{ID: util.NormalizePath(p1), Path: p1, Name: "repo-1", Kind: "repo"}
+	r2 := &state.Repo{ID: util.NormalizePath(p2), Path: p2, Name: "repo-2", Kind: "repo"}
+	r3 := &state.Repo{ID: util.NormalizePath(p3), Path: p3, Name: "repo-external", Group: "job", Kind: "repo"}
+	st.Repos = append(st.Repos, r1, r2, r3)
+	st.AddGroup("job")
+	st.AddGroup("study")
+	_ = st.Save()
 
+	sc, err := scope.Parse("file:" + workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 验证在 workDir 下输入 group：
+	// 1. 选择分组 "job" (allGroups 字典序: job, study -> 1 为 job)
+	// 2. 选择操作 1 (添加仓库到此分组)
+	// 3. 候选仅包含当前目录下的 repo-1 和 repo-2，选 1 (repo-1)
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("1\n1\n1\n"))
+	code := cmdGroup(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("cmdGroup 在目录作用域下执行失败: %d", code)
+	}
+	if r1.Group != "job" {
+		t.Fatalf("期望 r1.Group = job, 实际: %s", r1.Group)
+	}
+	if r2.Group != "" {
+		t.Fatalf("r2 不应被修改分组, 实际: %s", r2.Group)
+	}
+}
+
+func TestCmdGroupInDirectoryScope_RemoveRepoDistinguishesScope(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workDir := filepath.Join(tmpDir, "workDir")
+	otherDir := filepath.Join(tmpDir, "otherDir")
+	p1 := filepath.Join(workDir, "repo-1")
+	p2 := filepath.Join(otherDir, "repo-ext")
+
+	r1 := &state.Repo{ID: util.NormalizePath(p1), Path: p1, Name: "repo-1", Group: "job", Kind: "repo"}
+	r2 := &state.Repo{ID: util.NormalizePath(p2), Path: p2, Name: "repo-ext", Group: "job", Kind: "repo"}
+	st.Repos = append(st.Repos, r1, r2)
+	st.AddGroup("job")
+	_ = st.Save()
+
+	sc, err := scope.Parse("file:" + workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 捕获输出以验证区分显示
+	oldStdout := os.Stdout
+	rPipe, wPipe, _ := os.Pipe()
+	os.Stdout = wPipe
+
+	// 1. 选择分组 1 (job)
+	// 2. 选择操作 2 (从此分组移出仓库)
+	// 3. 排序后当前目录 r1 在前为 1，外部仓库 r2 为 2，选择 2 移出外部仓库 r2
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("1\n2\n2\n"))
+	code := cmdGroup(ctx, parseArgs([]string{}))
+
+	_ = wPipe.Close()
+	os.Stdout = oldStdout
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, rPipe)
+	out := buf.String()
+
+	if code != 0 {
+		t.Fatalf("cmdGroup 移出执行失败: %d", code)
+	}
+	if r2.Group != "" {
+		t.Fatalf("外部仓库 r2 期望被移出分组, 实际: %s", r2.Group)
+	}
+	if r1.Group != "job" {
+		t.Fatalf("当前目录仓库 r1 期望仍保留在 job, 实际: %s", r1.Group)
+	}
+
+	// 验证区分显示
+	if !strings.Contains(out, "[当前目录]") {
+		t.Fatalf("输出中缺少 [当前目录] 标记, 输出:\n%s", out)
+	}
+	if !strings.Contains(out, "[超出范围]") {
+		t.Fatalf("输出中缺少 [超出范围] 标记, 输出:\n%s", out)
+	}
+}
+
+func TestCmdGroupInDirectoryScope_CreateNewGroup(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workDir := filepath.Join(tmpDir, "workDir")
+	p1 := filepath.Join(workDir, "repo-local")
+	r1 := &state.Repo{ID: util.NormalizePath(p1), Path: p1, Name: "repo-local", Kind: "repo"}
+	st.Repos = append(st.Repos, r1)
+	_ = st.Save()
+
+	sc, err := scope.Parse("file:" + workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 当前尚未创建任何分组：
+	// 1. 选择 + (新建分组并管理)
+	// 2. 输入名称 "brand_new"
+	// 3. 选择操作 1 (添加仓库到此分组)
+	// 4. 选择候选 1 (repo-local)
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("+\nbrand_new\n1\n1\n"))
+	code := cmdGroup(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("创建新分组并分配失败: %d", code)
+	}
+	if !st.HasGroup("brand_new") {
+		t.Fatalf("期望状态中已添加 brand_new 分组")
+	}
+	if r1.Group != "brand_new" {
+		t.Fatalf("期望 r1.Group = brand_new, 实际: %s", r1.Group)
+	}
+}
+
+func TestCmdGroupInDirectoryScope_BatchMultiSelectAdd(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workDir := filepath.Join(tmpDir, "workDir")
+	p1 := filepath.Join(workDir, "repo-1")
+	p2 := filepath.Join(workDir, "repo-2")
+	p3 := filepath.Join(workDir, "repo-3")
+
+	r1 := &state.Repo{ID: util.NormalizePath(p1), Path: p1, Name: "repo-1", Kind: "repo"}
+	r2 := &state.Repo{ID: util.NormalizePath(p2), Path: p2, Name: "repo-2", Kind: "repo"}
+	r3 := &state.Repo{ID: util.NormalizePath(p3), Path: p3, Name: "repo-3", Kind: "repo"}
+	st.Repos = append(st.Repos, r1, r2, r3)
+	st.AddGroup("team")
+	_ = st.Save()
+
+	sc, err := scope.Parse("file:" + workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 1. 选择分组 1 (team)
+	// 2. 选择操作 1 (添加仓库到此分组)
+	// 3. 多选输入 "1 2" (同时添加 repo-1 与 repo-2)
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("1\n1\n1 2\n"))
+	code := cmdGroup(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("多选添加仓库失败: %d", code)
+	}
+	if r1.Group != "team" || r2.Group != "team" {
+		t.Fatalf("期望 r1 和 r2 均加入 team, 实际: r1=%s, r2=%s", r1.Group, r2.Group)
+	}
+	if r3.Group != "" {
+		t.Fatalf("r3 未被勾选，不应加入 team, 实际: %s", r3.Group)
+	}
+}
+
+func TestCmdGroupInDirectoryScope_BatchMultiSelectRemove(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workDir := filepath.Join(tmpDir, "workDir")
+	p1 := filepath.Join(workDir, "repo-1")
+	p2 := filepath.Join(workDir, "repo-2")
+	p3 := filepath.Join(workDir, "repo-3")
+
+	r1 := &state.Repo{ID: util.NormalizePath(p1), Path: p1, Name: "repo-1", Group: "team", Kind: "repo"}
+	r2 := &state.Repo{ID: util.NormalizePath(p2), Path: p2, Name: "repo-2", Group: "team", Kind: "repo"}
+	r3 := &state.Repo{ID: util.NormalizePath(p3), Path: p3, Name: "repo-3", Group: "team", Kind: "repo"}
+	st.Repos = append(st.Repos, r1, r2, r3)
+	st.AddGroup("team")
+	_ = st.Save()
+
+	sc, err := scope.Parse("file:" + workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scope.Resolve(sc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 1. 选择分组 1 (team)
+	// 2. 选择操作 2 (从此分组移出仓库)
+	// 3. 多选输入 "1 3" (同时移出 repo-1 与 repo-3)
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("1\n2\n1 3\n"))
+	code := cmdGroup(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("多选移出仓库失败: %d", code)
+	}
+	if r1.Group != "" || r3.Group != "" {
+		t.Fatalf("期望 r1 和 r3 均被移出分组, 实际: r1=%s, r3=%s", r1.Group, r3.Group)
+	}
+	if r2.Group != "team" {
+		t.Fatalf("期望 r2 保留在 team, 实际: %s", r2.Group)
+	}
+}

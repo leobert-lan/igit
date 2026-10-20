@@ -403,3 +403,33 @@ func TestSummaryWithGroupAndTags(t *testing.T) {
 		t.Fatalf("Summary 格式不符合预期: %q", s5)
 	}
 }
+
+func TestResolveHiddenDirectoryScope(t *testing.T) {
+	st := fixture()
+	// 将 D:\repos 隐藏
+	st.Hide(`D:\repos`, "不想管理的目录")
+
+	// 1. 日常可见池 Visible(st) 里应该不再有 D:\repos 下的仓库
+	visible := Visible(st)
+	for _, r := range visible {
+		if util.HasPrefixPath(r.Path, `D:\repos`) {
+			t.Fatalf("D:\\repos 应该已被从日常可见池中过滤，但依然存在: %s", r.Path)
+		}
+	}
+
+	// 2. 当用户显式 cd 走到已隐藏目录时，探照灯亮起，允许透视该区域并标记 IsHidden
+	sc := mustParse(t, `file:D:\repos`)
+	res, err := Resolve(sc, st)
+	if err != nil {
+		t.Fatalf("Resolve 隐藏目录不应报错: %v", err)
+	}
+	if !res.IsHidden {
+		t.Errorf("res.IsHidden 应为 true，但为 false")
+	}
+	if len(res.Repos) != 2 {
+		t.Errorf("透视查看应包含该目录下的 2 个仓库，实际得到 %d 个", len(res.Repos))
+	}
+	if res.NodeType != NodeDir {
+		t.Errorf("res.NodeType 期望 NodeDir，实际为 %v", res.NodeType)
+	}
+}

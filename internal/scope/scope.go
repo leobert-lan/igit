@@ -74,11 +74,11 @@ type TrailStep struct {
 
 // Item 是 ls 列出的一个子项。
 type Item struct {
-	Facet   string // file | group | tag | repo，供分区渲染
-	Label   string // 显示名
-	Target  string // 可以 cd 进去的 scope 字符串
-	Count   int    // 集合类子项带的数量
-	Summary string // 仓库类子项的一句话摘要
+	Facet   string      // file | group | tag | repo，供分区渲染
+	Label   string      // 显示名
+	Target  string      // 可以 cd 进去的 scope 字符串
+	Count   int         // 集合类子项带的数量
+	Summary string      // 仓库类子项的一句话摘要
 	Repo    *state.Repo // 关联的具体仓库（若为 DimRepo）
 }
 
@@ -105,6 +105,9 @@ type Resolved struct {
 	// 它既是"这里本身"，又是别的仓库的父目录 —— 不指定维度就没法确定看哪个视角，
 	// 所以默认给你集合视角（里面有什么），自身状态单独标出来，想看它自己用 repo:。
 	Self *state.Repo
+
+	// IsHidden 标识当前作用域节点是否处于 hide 隐藏区域中
+	IsHidden bool
 }
 
 // TargetRepo 返回当前节点直接代表的具体仓库（若站在 Repo 节点，或者单仓目录/Self）。
@@ -347,6 +350,15 @@ func Resolve(sc Scope, st *state.State) (*Resolved, error) {
 					next = append(next, r)
 				}
 			}
+			// 透视机制：若该目录被 hide 导致在日常可见池（cur/Visible）中未命中，
+			// 但用户显式 cd 走到了这里，探照灯亮起，允许从全量 state.Repos 载入该目录下的客观仓库
+			if len(next) == 0 && st != nil {
+				for _, r := range st.Repos {
+					if util.HasPrefixPath(r.Path, g.Ident) {
+						next = append(next, r)
+					}
+				}
+			}
 		case DimGroup:
 			for _, r := range cur {
 				if r.Group != "" && strings.EqualFold(r.Group, g.Ident) {
@@ -374,6 +386,12 @@ func Resolve(sc Scope, st *state.State) (*Resolved, error) {
 		}
 		if len(next) == 0 {
 			if g.Dim == DimGroup && st != nil && st.HasGroup(g.Ident) {
+				cur = next
+				last = g
+				have = true
+				continue
+			}
+			if g.Dim == DimFile && st != nil && st.IsHidden(g.Ident) {
 				cur = next
 				last = g
 				have = true
@@ -430,7 +448,20 @@ func Resolve(sc Scope, st *state.State) (*Resolved, error) {
 		nodeType = NodeRepo
 	}
 
-	res := &Resolved{Scope: sc, Kind: kind, NodeType: nodeType, Repos: cur, Self: self, Freshness: Freshness(st)}
+	isHidden := false
+	if have && last.Dim == DimFile && st != nil {
+		isHidden = st.IsHidden(last.Ident)
+	}
+
+	res := &Resolved{
+		Scope:     sc,
+		Kind:      kind,
+		NodeType:  nodeType,
+		Repos:     cur,
+		Self:      self,
+		Freshness: Freshness(st),
+		IsHidden:  isHidden,
+	}
 	res.Totals = totalsOf(cur)
 	res.Children = childrenOf(sc, cur, Visible(st), kind, st)
 	return res, nil
