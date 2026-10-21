@@ -270,7 +270,7 @@ func repoLabel(r *state.Repo, opt Opt) string {
 	if r.Group != "" {
 		parts = append(parts, "["+r.Group+"]")
 	}
-	parts = append(parts, render.StatusCN(r))
+	//parts = append(parts, render.StatusCN(r))
 	if opt.ShowAll {
 		parts = append(parts, r.Path)
 	}

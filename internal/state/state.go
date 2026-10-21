@@ -14,6 +14,7 @@ import (
 const CurrentVersion = 1
 
 // 处理状态。空值等同于 new。
+// Deprecated:作用不大，打算移除
 const (
 	StatusNew      = "new"
 	StatusActive   = "active"
@@ -21,6 +22,7 @@ const (
 	StatusArchived = "archived"
 )
 
+// todo 这部分似乎对使用没什么帮助，时时勤拂拭，那有什么active和done
 var StatusList = []string{StatusNew, StatusActive, StatusDone, StatusArchived}
 
 // Repo 一条仓库记录。成段划分：
@@ -56,12 +58,12 @@ type Repo struct {
 	LastSeen  string `json:"last_seen"`
 	Missing   bool   `json:"missing,omitempty"`
 
-	Group      string   `json:"group,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	Status     string   `json:"status,omitempty"`
-	Ignored    bool     `json:"ignored,omitempty"`
-	Note       string   `json:"note,omitempty"`
-	ReviewedAt string   `json:"reviewed_at,omitempty"`
+	Group string   `json:"group,omitempty"`
+	Tags  []string `json:"tags,omitempty"`
+	//Status     string   `json:"status,omitempty"`
+	Ignored    bool   `json:"ignored,omitempty"`
+	Note       string `json:"note,omitempty"`
+	ReviewedAt string `json:"reviewed_at,omitempty"`
 }
 
 // ScanRecord 每次扫描留一条流水，方便回头看历史。
@@ -325,7 +327,6 @@ func (s *State) Upsert(found []*Repo, seen map[string]bool, roots, ignoredIDs []
 		if prev, ok := existing[f.ID]; ok {
 			f.Group = prev.Group
 			f.Tags = prev.Tags
-			f.Status = prev.Status
 			f.Ignored = prev.Ignored
 			f.Note = prev.Note
 			f.ReviewedAt = prev.ReviewedAt
@@ -337,7 +338,6 @@ func (s *State) Upsert(found []*Repo, seen map[string]bool, roots, ignoredIDs []
 			*prev = *f
 		} else {
 			f.FirstSeen = now
-			f.Status = StatusNew
 			s.Repos = append(s.Repos, f)
 			added++
 		}
@@ -454,11 +454,11 @@ func (s *State) SortBy(f SortField, desc bool) {
 				return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 			}
 			return a.Group < b.Group
-		case SortStatus:
-			if a.Status == b.Status {
-				return strings.ToLower(a.Name) < strings.ToLower(b.Name)
-			}
-			return a.Status < b.Status
+		//case SortStatus:
+		//	if a.Status == b.Status {
+		//		return strings.ToLower(a.Name) < strings.ToLower(b.Name)
+		//	}
+		//	return a.Status < b.Status
 		case SortSize:
 			return a.SizeBytes > b.SizeBytes
 		default: // SortPath
@@ -487,8 +487,8 @@ const (
 	SortCommit SortField = "commit"
 	SortName   SortField = "name"
 	SortGroup  SortField = "group"
-	SortStatus SortField = "status"
-	SortSize   SortField = "size"
+	//SortStatus SortField = "status"
+	SortSize SortField = "size"
 )
 
 func ParseSortField(s string) SortField {
@@ -499,8 +499,8 @@ func ParseSortField(s string) SortField {
 		return SortName
 	case "group":
 		return SortGroup
-	case "status":
-		return SortStatus
+	//case "status":
+	//	return SortStatus
 	case "size":
 		return SortSize
 	default:

@@ -161,8 +161,8 @@ func dispatch(ctx *appCtx, cmd string, a args) int {
 		return cmdTag(ctx, a)
 	case "lsbytag", "ls-by-tag":
 		return cmdLsByTag(ctx, a)
-	case "status":
-		return cmdStatus(ctx, a)
+	//case "status":
+	//	return cmdStatus(ctx, a)
 	case "note":
 		return cmdNote(ctx, a)
 	case "dupes":
@@ -1451,9 +1451,7 @@ func pendingCount(st *state.State, pool []*state.Repo) int {
 		if r.Ignored || r.Missing || st.IsHidden(r.Path) {
 			continue
 		}
-		if r.Status == "" || r.Status == state.StatusNew {
-			n++
-		}
+		n++
 	}
 	return n
 }
@@ -1684,7 +1682,7 @@ func filterRepos(st *state.State, a args, in []*state.Repo) []*state.Repo {
 	showMissing := a.has("missing")
 	wantGroup := a.str("", "group", "g")
 	wantTag := a.str("", "tag", "t")
-	wantStatus := normalizeStatus(a.str("", "status"))
+	//wantStatus := normalizeStatus(a.str("", "status"))
 	wantKind := a.str("", "kind", "k")
 	query := strings.ToLower(a.str("", "query", "q"))
 	wantDirty := a.has("dirty")
@@ -1713,14 +1711,6 @@ func filterRepos(st *state.State, a args, in []*state.Repo) []*state.Repo {
 			} else if r.Missing {
 				continue
 			}
-			if !showIgnored && !showMissing {
-				if !(r.Status == "" || r.Status == state.StatusNew) {
-					continue
-				}
-			}
-		}
-		if wantStatus != "" && canonicalStatus(r) != wantStatus {
-			continue
 		}
 		if wantGroup != "" && !strings.EqualFold(r.Group, wantGroup) {
 			continue
@@ -1765,14 +1755,8 @@ func canonicalStatus(r *state.Repo) string {
 	switch {
 	case r.Ignored:
 		return "ignored"
-	case r.Status == state.StatusActive:
-		return state.StatusActive
-	case r.Status == state.StatusDone:
-		return state.StatusDone
-	case r.Status == state.StatusArchived:
-		return state.StatusArchived
 	default:
-		return state.StatusNew
+		return "normal"
 	}
 }
 
@@ -1796,8 +1780,9 @@ func normalizeStatus(s string) string {
 // ---------------------------------------------------------------- set
 
 func cmdSet(ctx *appCtx, a args) int {
+	//todo 这个命令太复杂了，考虑轻量化或者直接移除
 	if len(a.pos) == 0 {
-		fmt.Println("用法: igit set <关键字> [--group=X] [--status=X] [--tag=a,b] [--untag=a,b] [--note=X] [--ignore|--unignore] [--yes]")
+		fmt.Println("用法: igit set <关键字> [--group=X][--tag=a,b] [--untag=a,b] [--note=X] [--ignore|--unignore] [--yes]")
 		fmt.Println("关键字可以是完整路径、路径片段或仓库名。")
 		return 2
 	}
@@ -1835,7 +1820,7 @@ func cmdSet(ctx *appCtx, a args) int {
 	}
 
 	group, hasGroup := a.kv["group"]
-	statusArg, hasStatus := a.kv["status"]
+	//statusArg, hasStatus := a.kv["status"]
 	addTags := splitList(a.str("", "tag", "tags"))
 	delTags := splitList(a.str("", "untag", "untags"))
 	note, hasNote := a.kv["note"]
@@ -1845,11 +1830,6 @@ func cmdSet(ctx *appCtx, a args) int {
 	unignore := a.has("unignore")
 	dropTags := a.has("clear_tags")
 
-	if hasStatus && normalizeStatus(statusArg) == "" {
-		fmt.Fprintf(os.Stderr, "无法识别的状态 %q，可选: new/active/done/archived\n", statusArg)
-		return 2
-	}
-
 	now := time.Now().Format(time.RFC3339)
 	for _, r := range list {
 		if hasGroup {
@@ -1857,9 +1837,6 @@ func cmdSet(ctx *appCtx, a args) int {
 		}
 		if dropGroup {
 			r.Group = ""
-		}
-		if hasStatus {
-			r.Status = normalizeStatus(statusArg)
 		}
 		if dropTags {
 			r.Tags = nil
@@ -1884,7 +1861,7 @@ func cmdSet(ctx *appCtx, a args) int {
 		if unignore {
 			r.Ignored = false
 		}
-		if hasGroup || hasStatus || len(addTags) > 0 || len(delTags) > 0 || hasNote || ignore || unignore {
+		if hasGroup || len(addTags) > 0 || len(delTags) > 0 || hasNote || ignore || unignore {
 			r.ReviewedAt = now
 		}
 		state.Canonicalize(r)
@@ -3672,57 +3649,6 @@ func cmdLsByTag(ctx *appCtx, a args) int {
 	}
 }
 
-func cmdStatus(ctx *appCtx, a args) int {
-	target := ctx.res.TargetRepo()
-	if len(a.pos) == 0 {
-		if target != nil {
-			st := target.Status
-			if st == "" {
-				st = "new"
-			}
-			fmt.Printf("%s 当前状态: %s\n", target.Name, st)
-			return 0
-		}
-		fmt.Println("用法: status [仓库] <new|active|done|archived>")
-		return 2
-	}
-	var kw, stVal string
-	if len(a.pos) == 1 {
-		if target != nil {
-			stVal = a.pos[0]
-		} else {
-			fmt.Println("用法: status <仓库关键字> <状态值>")
-			return 2
-		}
-	} else {
-		kw = a.pos[0]
-		stVal = a.pos[1]
-	}
-	norm := normalizeStatus(stVal)
-	if norm == "" {
-		fmt.Fprintf(os.Stderr, "无法识别的状态 %q，可选: new/active/done/archived\n", stVal)
-		return 2
-	}
-	var r *state.Repo
-	if kw != "" {
-		r = pickTarget(ctx, "status", kw)
-		if r == nil {
-			return 2
-		}
-	} else {
-		r = target
-	}
-	r.Status = norm
-	r.ReviewedAt = time.Now().Format(time.RFC3339)
-	state.Canonicalize(r)
-	if err := ctx.state.Save(); err != nil {
-		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
-		return 1
-	}
-	fmt.Printf("已将 %s 状态设置为: %s\n", r.Name, r.Status)
-	return 0
-}
-
 func cmdNote(ctx *appCtx, a args) int {
 	target := ctx.res.TargetRepo()
 	if len(a.pos) == 0 {
@@ -3908,7 +3834,7 @@ func cmdStats(ctx *appCtx, a args) int {
 		printSingleRepoStats(target)
 		return 0
 	}
-	byStatus := map[string]int{}
+	//byStatus := map[string]int{}
 	byGroup := map[string]int{}
 	byKind := map[string]int{}
 	dirty, noRemote, ahead, sizeSum := 0, 0, 0, int64(0)
@@ -3917,7 +3843,7 @@ func cmdStats(ctx *appCtx, a args) int {
 		if st.IsHidden(r.Path) {
 			continue
 		}
-		byStatus[canonicalStatus(r)]++
+		//byStatus[canonicalStatus(r)]++
 		byGroup[r.Group]++
 		byKind[r.Kind]++
 		if r.Dirty {
@@ -3937,11 +3863,6 @@ func cmdStats(ctx *appCtx, a args) int {
 	fmt.Println("仓库概览")
 	fmt.Printf("  清单总数     %d\n", len(pool))
 	fmt.Printf("  待处理       %d\n", pendingCount(st, scopeRepos(ctx)))
-	fmt.Println("  状态分布:")
-	for _, s := range state.StatusList {
-		fmt.Printf("    %-8s %d\n", s, byStatus[s])
-	}
-	fmt.Printf("    ignored  %d\n", byStatus["ignored"])
 	if len(byGroup) > 0 {
 		fmt.Println("  分组:")
 		keys := util.SortedKeys(byGroup)
@@ -4015,11 +3936,6 @@ func printSingleRepoStats(r *state.Repo) {
 	if len(r.Tags) > 0 {
 		fmt.Printf("  标签:        %s\n", strings.Join(r.Tags, ", "))
 	}
-	st := r.Status
-	if st == "" {
-		st = "new (待处理)"
-	}
-	fmt.Printf("  处理状态:    %s\n", st)
 	if r.Note != "" {
 		fmt.Printf("  备注:        %s\n", r.Note)
 	}

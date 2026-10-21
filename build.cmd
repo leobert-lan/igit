@@ -17,7 +17,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-copy /y igit.exe grscan.exe >nul 2>nul
+@REM copy /y igit.exe grscan.exe >nul 2>nul
 
 echo.
 echo [ok] 已生成 %CD%\igit.exe

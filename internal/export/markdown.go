@@ -51,13 +51,13 @@ func partitionFolded(repos []*state.Repo, folded []string) (visible []*state.Rep
 
 // MarkdownFlat 平铺表格版，老格式，适合直接粘表格的场景。
 func MarkdownFlat(w io.Writer, repos []*state.Repo) error {
-	if _, err := fmt.Fprintf(w, "| 仓库 | 分支 | 改动 | 最近提交 | 分组 | 状态 | 路径 |\n|---|---|---|---|---|---|---|\n"); err != nil {
+	if _, err := fmt.Fprintf(w, "| 仓库 | 分支 | 改动 | 最近提交 | 分组 | 路径 |\n|---|---|---|---|---|---|---|\n"); err != nil {
 		return err
 	}
 	for _, r := range repos {
-		if _, err := fmt.Fprintf(w, "| %s | %s | %s | %s | %s | %s | `%s` |\n",
+		if _, err := fmt.Fprintf(w, "| %s | %s | %s | %s | %s | `%s` |\n",
 			escapeCell(r.Name), escapeCell(branchLabel(r)), render.ChangeLabel(r),
-			render.CommitAge(r), escapeCell(orDash(r.Group)), render.StatusCN(r), escapeCell(r.Path)); err != nil {
+			render.CommitAge(r), escapeCell(orDash(r.Group)), escapeCell(r.Path)); err != nil {
 			return err
 		}
 	}
@@ -79,11 +79,11 @@ func MarkdownOutline(w io.Writer, repos []*state.Repo, folded []string) error {
 }
 
 func overview(repos []*state.Repo) string {
-	byStatus := map[string]int{}
+	//byStatus := map[string]int{}
 	groups := map[string]int{}
 	dirty, noRemote, ahead, missing := 0, 0, 0, 0
 	for _, r := range repos {
-		byStatus[render.StatusCN(r)]++
+		//byStatus[render.StatusCN(r)]++
 		groups[orDash(r.Group)]++
 		if r.Dirty {
 			dirty++
@@ -101,21 +101,21 @@ func overview(repos []*state.Repo) string {
 
 	var b strings.Builder
 	b.WriteString("## 概览\n\n")
-	b.WriteString("| 状态 | 数量 |\n|---|---|\n")
-	order := []string{"待处理", "跟进中", "已处理", "已归档", "已忽略"}
-	seen := map[string]bool{}
-	for _, s := range order {
-		if byStatus[s] > 0 {
-			b.WriteString(fmt.Sprintf("| %s | %d |\n", s, byStatus[s]))
-			seen[s] = true
-		}
-	}
-	for s, n := range byStatus {
-		if !seen[s] && n > 0 {
-			b.WriteString(fmt.Sprintf("| %s | %d |\n", escapeCell(s), n))
-		}
-	}
-	b.WriteString("\n")
+	//b.WriteString("| 状态 | 数量 |\n|---|---|\n")
+	//order := []string{"待处理", "跟进中", "已处理", "已归档", "已忽略"}
+	////seen := map[string]bool{}
+	//for _, s := range order {
+	//	if byStatus[s] > 0 {
+	//		b.WriteString(fmt.Sprintf("| %s | %d |\n", s, byStatus[s]))
+	//		seen[s] = true
+	//	}
+	//}
+	//for s, n := range byStatus {
+	//	if !seen[s] && n > 0 {
+	//		b.WriteString(fmt.Sprintf("| %s | %d |\n", escapeCell(s), n))
+	//	}
+	//}
+	//b.WriteString("\n")
 
 	names := util.SortedKeys(groups)
 	if len(names) > 0 && !(len(names) == 1 && names[0] == "-") {
@@ -234,10 +234,10 @@ func directorySections(repos []*state.Repo, folded []string) string {
 		b.WriteString(fmt.Sprintf("### `%s`\n\n", g.Dir))
 		b.WriteString(fmt.Sprintf("%d 个仓库\n\n", g.Count))
 		visible := g.Repos
-		b.WriteString("| 仓库 | 分支 | 改动 | 同步 | 最近提交 | 分组 | 标签 | 状态 | 备注 |\n")
+		b.WriteString("| 仓库 | 分支 | 改动 | 同步 | 最近提交 | 分组 | 标签 | 备注 |\n")
 		b.WriteString("|---|---|---|---|---|---|---|---|---|\n")
 		for _, r := range visible {
-			b.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",
+			b.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s | %s |\n",
 				escapeCell(r.Name),
 				escapeCell(branchLabel(r)),
 				render.ChangeLabel(r),
@@ -245,7 +245,6 @@ func directorySections(repos []*state.Repo, folded []string) string {
 				render.CommitAge(r),
 				escapeCell(orDash(r.Group)),
 				escapeCell(orDash(render.TagsLabel(r))),
-				render.StatusCN(r),
 				escapeCell(orDash(r.Note)),
 			))
 		}

@@ -32,7 +32,7 @@ func GenerateGlobalTree(w io.Writer, repos []*state.Repo, folded []string) error
 
 	// 2. 全量物理路径清单（按字母升序排列）
 	b.WriteString("## 2. 完整物理路径对照表 (Path Mapping)\n\n")
-	b.WriteString("| 仓库名称 | 物理绝对路径 | 分支 | 分组 | 标签 | 状态 |\n")
+	b.WriteString("| 仓库名称 | 物理绝对路径 | 分支 | 分组 | 标签 |\n")
 	b.WriteString("|---|---|---|---|---|---|\n")
 
 	sortedRepos := append([]*state.Repo{}, repos...)
@@ -50,13 +50,12 @@ func GenerateGlobalTree(w io.Writer, repos []*state.Repo, folded []string) error
 		if tags == "" {
 			tags = "-"
 		}
-		b.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s | %s | %s |\n",
+		b.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s | %s |\n",
 			escapeCell(r.Name),
 			cleanPath,
 			escapeCell(render.BranchLabel(r)),
 			escapeCell(grp),
 			escapeCell(tags),
-			render.StatusCN(r),
 		))
 	}
 	b.WriteString("\n")

@@ -21,7 +21,7 @@ func CSV(w io.Writer, repos []*state.Repo) error {
 	header := []string{
 		"name", "path", "kind", "branch", "dirty", "staged", "unstaged", "untracked",
 		"ahead", "behind", "remote", "last_commit", "last_author", "last_subject",
-		"group", "tags", "status", "ignored", "note", "first_seen", "last_seen", "missing",
+		"group", "tags", "ignored", "note", "first_seen", "last_seen", "missing",
 	}
 	if err := cw.Write(header); err != nil {
 		return err
@@ -32,7 +32,7 @@ func CSV(w io.Writer, repos []*state.Repo) error {
 			itoa(r.Staged), itoa(r.Unstaged), itoa(r.Untracked),
 			itoa(r.Ahead), itoa(r.Behind), r.PrimaryURL, humanTime(r.CommitAt),
 			r.Author, r.Subject,
-			r.Group, joinTags(r), effectiveStatus(r), boolStr(r.Ignored),
+			r.Group, joinTags(r), boolStr(r.Ignored),
 			r.Note, humanTime(r.FirstSeen), humanTime(r.LastSeen), boolStr(r.Missing),
 		}
 		if err := cw.Write(row); err != nil {
@@ -47,12 +47,6 @@ func JSON(w io.Writer, repos []*state.Repo) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(repos)
-}
-
-// Markdown 系列导出在 markdown.go：MarkdownTree / MarkdownFlat / MarkdownOutline。
-
-func effectiveStatus(r *state.Repo) string {
-	return render.StatusCN(r)
 }
 
 func joinTags(r *state.Repo) string {

@@ -171,7 +171,7 @@ func (m *model) inScope(r *state.Repo) bool {
 	case scopeIgnored:
 		return r.Ignored
 	default:
-		return !r.Ignored && (r.Status == "" || r.Status == state.StatusNew) && !r.Missing
+		return !r.Ignored && !r.Missing
 	}
 }
 
@@ -501,24 +501,25 @@ func (m model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.msg = "已清除过滤"
 		m.refresh()
 		return m, nil
-	case "S":
-		m.apply(func(r *state.Repo) { r.Status = state.NextStatus(r.Status) })
-		return m, nil
-	case "d":
-		m.apply(func(r *state.Repo) { r.Status = state.StatusDone })
-		return m, nil
-	case "w":
-		m.apply(func(r *state.Repo) { r.Status = state.StatusActive })
-		return m, nil
-	case "z":
-		m.apply(func(r *state.Repo) { r.Status = state.StatusArchived })
-		return m, nil
-	case "u":
-		m.apply(func(r *state.Repo) {
-			r.Status = state.StatusNew
-			r.Ignored = false
-		})
-		return m, nil
+		//todo 这个 TUI的功能实在晦涩，要么全改掉，要么不再使用
+	//case "S":
+	//	m.apply(func(r *state.Repo) { r.Status = state.NextStatus(r.Status) })
+	//	return m, nil
+	//case "d":
+	//	m.apply(func(r *state.Repo) { r.Status = state.StatusDone })
+	//	return m, nil
+	//case "w":
+	//	m.apply(func(r *state.Repo) { r.Status = state.StatusActive })
+	//	return m, nil
+	//case "z":
+	//	m.apply(func(r *state.Repo) { r.Status = state.StatusArchived })
+	//	return m, nil
+	//case "u":
+	//	m.apply(func(r *state.Repo) {
+	//		r.Status = state.StatusNew
+	//		r.Ignored = false
+	//	})
+	//	return m, nil
 	case "I", "i":
 		m.apply(func(r *state.Repo) {
 			r.Ignored = !r.Ignored
@@ -882,7 +883,7 @@ func foldDetail(g *foldGroup) string {
 		if r.Dirty {
 			dirty++
 		}
-		if !r.Ignored && (r.Status == "" || r.Status == state.StatusNew) {
+		if !r.Ignored {
 			pending++
 		}
 	}
@@ -915,7 +916,7 @@ func (m model) foldLine(i int) string {
 		if r.Dirty {
 			dirty++
 		}
-		if !r.Ignored && (r.Status == "" || r.Status == state.StatusNew) {
+		if !r.Ignored {
 			pending++
 		}
 	}
@@ -1026,7 +1027,7 @@ func detailLine(r *state.Repo) string {
 	if r.Subject != "" {
 		out += "  |  " + strings.TrimSpace(r.Author+" "+r.Subject)
 	}
-	extra := []string{render.StatusCN(r)}
+	extra := []string{""}
 	if r.Group != "" {
 		extra = append(extra, "组:"+r.Group)
 	}

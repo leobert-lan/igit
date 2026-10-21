@@ -204,7 +204,7 @@ func generateDirReport(b *strings.Builder, dirPath string, res *scope.Resolved, 
 
 	// 3. 本目录下的仓库明细
 	b.WriteString("## 3. 本目录下仓库汇总\n\n")
-	b.WriteString("| 仓库名称 | 分支 | 改动 | 同步 | 分组 | 标签 | 状态 | 相对路径 |\n")
+	b.WriteString("| 仓库名称 | 分支 | 改动 | 同步 | 分组 | 标签 | 相对路径 |\n")
 	b.WriteString("|---|---|---|---|---|---|---|---|\n")
 	for _, r := range res.Repos {
 		rel := strings.TrimPrefix(filepath.ToSlash(r.Path), cleanDir)
@@ -212,14 +212,14 @@ func generateDirReport(b *strings.Builder, dirPath string, res *scope.Resolved, 
 		if rel == "" {
 			rel = "."
 		}
-		b.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s | %s | %s | %s | `%s` |\n",
+		b.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s | %s | %s | %s |\n",
 			escapeCell(r.Name),
 			escapeCell(render.BranchLabel(r)),
 			render.ChangeLabel(r),
 			render.SyncLabel(r),
 			escapeCell(orDash(r.Group)),
 			escapeCell(orDash(render.TagsLabel(r))),
-			render.StatusCN(r),
+			//render.StatusCN(r),
 			escapeCell(rel),
 		))
 	}
@@ -244,7 +244,7 @@ func generateRepoReport(b *strings.Builder, r *state.Repo, res *scope.Resolved) 
 	b.WriteString(fmt.Sprintf("| **当前分支** | `%s` (分离HEAD: %v) |\n", r.Branch, r.Detached))
 	b.WriteString(fmt.Sprintf("| **所属分组** | %s |\n", orDash(r.Group)))
 	b.WriteString(fmt.Sprintf("| **关联标签** | %s |\n", orDash(render.TagsLabel(r))))
-	b.WriteString(fmt.Sprintf("| **治理状态** | %s |\n", render.StatusCN(r)))
+	//b.WriteString(fmt.Sprintf("| **治理状态** | %s |\n", render.StatusCN(r)))
 	b.WriteString(fmt.Sprintf("| **人工备注** | %s |\n", orDash(r.Note)))
 	b.WriteString(fmt.Sprintf("| **初次扫描** | %s |\n", humanTime(r.FirstSeen)))
 	b.WriteString(fmt.Sprintf("| **最近更新** | %s |\n", humanTime(r.LastSeen)))

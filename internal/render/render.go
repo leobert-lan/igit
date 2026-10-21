@@ -25,34 +25,9 @@ func DefaultView(roots []string) View {
 }
 
 // Marker 用一位字符表示处理状态，纯 ASCII，控制台不会乱码。
+// Deprecated:不在计划使用状态
 func Marker(r *state.Repo) string {
-	switch {
-	case r.Ignored:
-		return "I"
-	case r.Status == state.StatusActive:
-		return "A"
-	case r.Status == state.StatusDone:
-		return "D"
-	case r.Status == state.StatusArchived:
-		return "Z"
-	default:
-		return "N"
-	}
-}
-
-func StatusCN(r *state.Repo) string {
-	switch {
-	case r.Ignored:
-		return "已忽略"
-	case r.Status == state.StatusActive:
-		return "跟进中"
-	case r.Status == state.StatusDone:
-		return "已处理"
-	case r.Status == state.StatusArchived:
-		return "已归档"
-	default:
-		return "待处理"
-	}
+	return "-"
 }
 
 func KindCN(r *state.Repo) string {
@@ -247,7 +222,7 @@ func (v View) FoldRow(dir string, repos []*state.Repo, total int) string {
 		if r.Dirty {
 			dirty++
 		}
-		if !r.Ignored && (r.Status == "" || r.Status == state.StatusNew) {
+		if !r.Ignored {
 			pending++
 		}
 		if t := CommitTime(r); t.After(latest) {

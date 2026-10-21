@@ -40,7 +40,7 @@ func GenerateOrphansTodo(w io.Writer, repos []*state.Repo, st *state.State) erro
 			continue
 		}
 		// 2. 明确忽略或归档的仓库：亦不属于未治理的游离资产
-		if r.Ignored || r.Status == state.StatusArchived {
+		if r.Ignored {
 			continue
 		}
 

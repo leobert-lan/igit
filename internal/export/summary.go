@@ -24,12 +24,12 @@ func GenerateGlobalSummary(w io.Writer, repos []*state.Repo, st *state.State) er
 	var stale = 0
 	cutoff := time.Now().AddDate(-1, 0, 0)
 
-	byStatus := map[string]int{}
+	//byStatus := map[string]int{}
 	groupStats := map[string]*groupStat{}
 	tagStats := map[string]*tagStat{}
 
 	for _, r := range repos {
-		byStatus[render.StatusCN(r)]++
+		//byStatus[render.StatusCN(r)]++
 
 		if r.Dirty {
 			dirty++
@@ -117,13 +117,13 @@ func GenerateGlobalSummary(w io.Writer, repos []*state.Repo, st *state.State) er
 
 	// 2. 治理处理状态统计
 	b.WriteString("## 2. 人工治理状态分布 (Triage Status)\n\n")
-	b.WriteString("| 处理状态 | 数量 | 占比 |\n|---|:---:|:---:|\n")
-	order := []string{"待处理", "跟进中", "已处理", "已归档", "已忽略"}
-	for _, s := range order {
-		cnt := byStatus[s]
-		b.WriteString(fmt.Sprintf("| %s | %d | %.1f%% |\n", s, cnt, pct(cnt, totalRepos)))
-	}
-	b.WriteString("\n")
+	b.WriteString("时时勤拂拭，不再提供自欺欺人的状态！")
+	//order := []string{"待处理", "跟进中", "已处理", "已归档", "已忽略"}
+	//for _, s := range order {
+	//	cnt := byStatus[s]
+	//	b.WriteString(fmt.Sprintf("| %s | %d | %.1f%% |\n", s, cnt, pct(cnt, totalRepos)))
+	//}
+	//b.WriteString("\n")
 
 	// 3. 组织分组统计 (Group Matrix)
 	b.WriteString("## 3. 组织分组统计矩阵 (Group Matrix)\n\n")

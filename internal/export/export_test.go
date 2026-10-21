@@ -29,7 +29,6 @@ func mockRepos() []*state.Repo {
 			Unstaged:   1,
 			PrimaryURL: "git@github.com:corp/backend-api.git",
 			CommitAt:   now,
-			Status:     state.StatusActive,
 		},
 		{
 			ID:         "repo-2",
@@ -41,7 +40,6 @@ func mockRepos() []*state.Repo {
 			Ahead:      3,
 			PrimaryURL: "git@github.com:corp/frontend-web.git",
 			CommitAt:   now,
-			Status:     state.StatusDone,
 		},
 		{
 			ID:         "repo-3",
@@ -54,7 +52,6 @@ func mockRepos() []*state.Repo {
 			Untracked:  5,
 			PrimaryURL: "", // 无远端
 			CommitAt:   old,
-			Status:     state.StatusNew,
 		},
 		{
 			ID:         "repo-4",
@@ -65,7 +62,6 @@ func mockRepos() []*state.Repo {
 			Tags:       []string{"script"},
 			PrimaryURL: "https://github.com/someone/stray.git",
 			CommitAt:   now,
-			Status:     state.StatusNew,
 		},
 	}
 }

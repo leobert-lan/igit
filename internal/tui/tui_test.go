@@ -5,8 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"grscan/internal/state"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // mkRepo 按完整路径造一个仓库记录。
