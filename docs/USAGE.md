@@ -22,17 +22,16 @@
 - [3. 扫描：scan](#3-扫描scan)
 - [4. 清单视图：list](#4-清单视图list)
 - [5. 空间视图：tree](#5-空间视图tree)
-- [6. 交互判别：triage](#6-交互判别triage)
-- [7. 标记与分类维护：group / tag / status / note / set](#7-标记与分类维护group--tag--status--note--set)
-- [8. 目录级规则：hide / fold](#8-目录级规则hide--fold)
-- [9. 查重与统计：dupes / stats](#9-查重与统计dupes--stats)
-- [10. 导出：export](#10-导出export)
-- [11. 配置：config](#11-配置config)
-- [12. 联动与打开：open / tig / rm / prune](#12-联动与打开open--tig--rm--prune)
-- [13. 表格列的含义](#13-表格列的含义)
-- [14. 典型工作流](#14-典型工作流)
-- [15. 常见问题](#15-常见问题)
-- [16. 命令速查](#16-命令速查)
+- [6. 标记与分类维护：group / tag / status / note / set](#6-标记与分类维护group--tag--status--note--set)
+- [7. 目录级规则：hide / fold](#7-目录级规则hide--fold)
+- [8. 查重与统计：dupes / stats](#8-查重与统计dupes--stats)
+- [9. 导出：export](#9-导出export)
+- [10. 配置：config](#10-配置config)
+- [11. 联动与打开：open / tig / rm / prune](#11-联动与打开open--tig--rm--prune)
+- [12. 表格列的含义](#12-表格列的含义)
+- [13. 典型工作流](#13-典型工作流)
+- [14. 常见问题](#14-常见问题)
+- [15. 命令速查](#15-命令速查)
 
 ---
 
@@ -49,11 +48,9 @@ igit config add-root D:\work
 rem 3) 正式扫描
 igit scan
 
-rem 4) 交互式判别处理
-igit triage
 ```
 
-之后日常只需要两步：`igit scan` 更新事实，`igit triage` 或 `igit list` 看剩下的。
+之后日常只需要两步：`igit scan` 更新事实，`igit list` 看剩下的。
 
 **建议先固定 exe 位置**，免得路径变来变去：
 
@@ -166,7 +163,6 @@ igit [file:D:\work] -> [repo:backend] > cd /    :: 一键回到全局根
    后面的命令**自动收敛在当前这批仓库里**：
    - `list` / `tree`：只列当前这批仓库，或只展开这块的目录树。
    - `stats`：统计当前这批仓库的数字。
-   - `triage`：在当前这批仓库中进行全屏逐个分类。
    - `export`：只导出当前这批仓库的报告。
    - `scan`（在目录下）：只重新扫描这个物理目录，局部刷新极快。
 
@@ -287,60 +283,7 @@ igit tree --dirty                  :: 未提交的改动都集中在哪
 
 ---
 
-## 6. 交互判别：triage
-
-全屏交互面板，适合坐下来一口气逐个或成批整理。
-
-```cmd
-igit triage
-igit triage --filter=ryxl          :: 只显示路径/名字/分组/标签含 ryxl 的
-igit triage --status=done          :: 打开时就进入「全部」视图
-igit triage --status=ignored       :: 打开时就进入「已忽略」视图
-```
-
-> **注意**：必须在真实终端里跑（PowerShell、CMD 或 Windows Terminal）。不要在 Git Bash 里管道重定向。
-
-### 6.1 界面示例
-
-```
- igit triage   视图[待处理]  共 199  已选 0  ✓ 已同步
-   NAME      BRANCH    CHG   SYNC   LAST    GROUP  PATH
-   > igit       main      -    ok    3天前   -      …\igit
-     firmware   dev *     3改  ↑2    2月前   工作   …\firmware
-
-   D:\work\igit | 待处理 | 无远端
- ↑↓ 移动 · 空格 勾选 · d 已处理 · q 退出保存 · ? 帮助 · G 分组 · v 视图 · F 过滤
-   没勾选时操作只作用于当前行 · 空格可勾选多个一起改 · ? 看全部快捷键
-```
-
-### 6.2 规则与快捷键
-
-> **有勾选的行 = 操作作用于全部勾选行；没勾选 = 只作用于光标所在行。**
-
-勾一个折叠起来的目录，等于勾它底下全部仓库。
-
-按 `?` 呼出完整快捷键表：
-
-```
-对象   有勾选的行 = 作用于全部勾选行；没勾选 = 只作用于光标所在行
-移动   ↑/k  ↓/j  PgUp/PgDn  Home/End
-多选   空格 选择/取消     A 全选    a 取消选择   Esc 清空选择
-处理   S 循环状态        d 已处理  w 跟进中  z 已归档  u 退回待处理
-归类   G 分组           T 标签    N 备注    x 清除分组
-忽略   I 忽略/取消忽略
-折叠   e 折叠/展开光标所在目录（临时，不写盘）
-视图   v 待处理/全部/已忽略      F 过滤路径   c 清除过滤
-查看   g 用 tig 打开当前仓库（新窗口）  o 资源管理器打开  r 查看详情
-保存   Ctrl+S           q 退出并保存        Ctrl+C 放弃改动退出
-```
-
-- **按 `d` 的行立刻从「待处理」视图消失**，适合从头往下快速清场。
-- **`G` / `T` / `N` / `F` 会进入输入状态**，按 Enter 确认，按 Esc 取消。
-- **`Ctrl+C` 放弃未保存改动直接退出**；`q` 会自动保存后退出。顶部会显示 `● 未保存` 或 `✓ 已同步`。
-
----
-
-## 7. 标记与分类维护：group / tag / status / note / set
+## 6. 标记与分类维护：group / tag / status / note / set
 
 ### 7.1 单仓就地维护（停在单仓节点时）
 
@@ -407,7 +350,7 @@ igit set proj-a --unignore
 
 ---
 
-## 8. 目录级规则：hide / fold
+## 7. 目录级规则：hide / fold
 
 ```cmd
 igit hide  D:\repos\ryxl_rd                     :: 这块彻底不看
@@ -429,7 +372,7 @@ igit dirs                                       :: 看看现在设了什么
 
 ---
 
-## 9. 查重与统计：dupes / stats
+## 8. 查重与统计：dupes / stats
 
 ### dupes：查找重复克隆
 
@@ -471,7 +414,7 @@ igit stats
 
 ---
 
-## 10. 导出：export
+## 9. 导出：export
 
 > **核心交互原则**：**如非必要，不使用复杂命令参数，选项交互永远是第一优先级！**  
 > 用户无需成为繁杂命令记忆的专家。在终端中裸敲 `igit export` 会自动拉起交互向导，按 `Enter` 即可完成默认导出并自动在资源管理器中打开。
@@ -507,7 +450,7 @@ igit export --format=json | jq ...          :: 标准输出管道处理
 
 ---
 
-## 11. 配置：config
+## 10. 配置：config
 
 > **核心交互原则**：**如非必要，不使用复杂命令参数，选项交互永远是第一优先级！**  
 > 无需记忆 `add-root`、`rm-root`、`set jobs=...` 等一长串参数。直接运行 `igit config` 即可进入全功能交互式配置管理中心。
@@ -555,7 +498,7 @@ igit config set jobs=24 max-depth=6 fast=true :: 命令行修改配置参数
 
 ---
 
-## 12. 联动与打开：open / tig / rm / prune
+## 11. 联动与打开：open / tig / rm / prune
 
 ```cmd
 rem 单仓节点下直接免参执行
@@ -575,7 +518,7 @@ igit prune --dry-run         :: 试运行，看会清理哪些
 
 ---
 
-## 13. 表格列的含义
+## 12. 表格列的含义
 
 | 列 | 含义 |
 |---|---|
@@ -590,7 +533,7 @@ igit prune --dry-run         :: 试运行，看会清理哪些
 
 ---
 
-## 14. 典型工作流
+## 13. 典型工作流
 
 ### A. 第一次摸底清理
 ```cmd
@@ -600,7 +543,6 @@ igit scan                               :: 扫描
 igit tree --brief --depth=2             :: 看目录骨架
 igit hide D:\repos\vendor               :: 彻底不需要看的目录直接隐藏
 igit fold D:\repos\backup               :: 只需看数量的目录直接折叠
-igit triage                             :: 全屏面板逐个整理
 ```
 
 ### B. 下班前排查改动
@@ -619,16 +561,10 @@ igit prune                              :: 清理无效记录
 
 ---
 
-## 15. 常见问题
+## 14. 常见问题
 
 **Q：`list` 什么都不显示？**  
 默认只看「待处理」。若都处理过了加 `--all` 查看；或确认是否执行过 `scan`。
-
-**Q：按了 `G` 之后键盘字母键按了没反应？**  
-进入了分组名称输入状态。输入完按 Enter 确认，按 Esc 取消。
-
-**Q：按 `Ctrl+C` 退出后刚才改的分组丢了？**  
-`Ctrl+C` 是放弃未保存更改。保存请按 `q` 或 `Ctrl+S`。
 
 **Q：扫描比较慢？**  
 加 `--fast` 参数跳过工作区改动检测；明确不需要看的庞大目录用 `hide` 屏蔽掉。
@@ -638,7 +574,7 @@ igit prune                              :: 清理无效记录
 
 ---
 
-## 16. 命令速查
+## 15. 命令速查
 
 | 命令 | 适用位置 | 说明 |
 |---|---|---|
@@ -651,7 +587,6 @@ igit prune                              :: 清理无效记录
 | `tree` | 任意位置 | 按目录树查看空间分布 |
 | `stats` | 任意位置 | 统计概览；**单仓下输出该仓库完整属性详情** |
 | `dupes` | 任意位置 | 查找重复克隆；**单仓下精准查找全盘同源副本** |
-| `triage` | 集合节点 | 全屏交互面板，在当前范围内逐个判别分类 |
 | `open` | 任意位置 | 资源管理器打开；**单仓下免参直接打开** |
 | `tig` | 任意位置 | 终端拉起 tig 查看历史；**单仓下免参直接打开** |
 | `group` | 任意位置 | 列出所有分组；单仓下 `group <名>` 划分分组或 `group clear` 移除 |

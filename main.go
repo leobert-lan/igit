@@ -25,7 +25,6 @@ import (
 	"grscan/internal/state"
 	"grscan/internal/tig"
 	"grscan/internal/tree"
-	"grscan/internal/tui"
 	"grscan/internal/util"
 
 	"github.com/chzyer/readline"
@@ -115,7 +114,7 @@ func run(raw []string) int {
 // needsScope 这些命令的结果随作用域变化，执行前都要先定作用域。
 func needsScope(cmd string) bool {
 	switch cmd {
-	case "", "ls", "list", "pwd", "triage", "tui", "tree", "export", "stats":
+	case "", "ls", "list", "pwd", "tree", "export", "stats":
 		return true
 	}
 	return false
@@ -123,7 +122,7 @@ func needsScope(cmd string) bool {
 
 // needsHardScope 这些命令没有作用域就没有东西可输出：定不出作用域必须报错，
 // 绝不静默退回全集 —— 你以为在看局部其实在看全局，这比报错危险得多。
-// 其余命令（triage/tree/export/stats）定不出时退回全集，但会把话说出来。
+// 其余命令（tree/export/stats）定不出时退回全集，但会把话说出来。
 func needsHardScope(cmd string) bool {
 	switch cmd {
 	case "", "ls", "list", "pwd":
@@ -151,10 +150,8 @@ func dispatch(ctx *appCtx, cmd string, a args) int {
 		return cmdList(ctx, a)
 	case "tree":
 		return cmdTree(ctx, a)
-	case "triage", "tui":
-		return cmdTriage(ctx, a)
-	case "set":
-		return cmdSet(ctx, a)
+	//case "set":
+	//	return cmdSet(ctx, a)
 	case "group":
 		return cmdGroup(ctx, a)
 	case "tag":
@@ -453,10 +450,10 @@ func commandsFor(ctx *appCtx) []string {
 		return append(common, "ls", "list", "open", "tig", "stats", "status", "note", "scan", "dupes", "set", "ignore", "remote", "fetch", "pull", "commit", "push")
 	case scope.KindRoot:
 		return append(common,
-			"ls", "list", "scan", "stats", "tree", "triage", "tui", "export", "dupes", "dirs", "tig", "fetch", "remote")
+			"ls", "list", "scan", "stats", "tree", "export", "dupes", "dirs", "tig", "fetch", "remote")
 	default:
 		acts := []string{
-			"ls", "list", "tree", "triage", "tui", "stats", "export", "set", "status", "note", "tig", "open", "hide", "fold", "dirs", "scan", "dupes", "fetch", "remote",
+			"ls", "list", "tree", "stats", "export", "set", "status", "note", "tig", "open", "hide", "fold", "dirs", "scan", "dupes", "fetch", "remote",
 		}
 		return append(common, acts...)
 	}
@@ -1402,7 +1399,7 @@ func cmdScan(ctx *appCtx, a args) int {
 	fmt.Println()
 	fmt.Printf("状态文件: %s\n", ctx.state.Path())
 	if pending > 0 {
-		fmt.Println("下一步: igit triage   逐个判别；或 igit list 看清单")
+		fmt.Println("下一步: igit list 看清单")
 	} else {
 		fmt.Println("待处理已清空。")
 	}
@@ -1777,111 +1774,11 @@ func normalizeStatus(s string) string {
 	}
 }
 
-// ---------------------------------------------------------------- set
-
-func cmdSet(ctx *appCtx, a args) int {
-	//todo 这个命令太复杂了，考虑轻量化或者直接移除
-	if len(a.pos) == 0 {
-		fmt.Println("用法: igit set <关键字> [--group=X][--tag=a,b] [--untag=a,b] [--note=X] [--ignore|--unignore] [--yes]")
-		fmt.Println("关键字可以是完整路径、路径片段或仓库名。")
-		return 2
-	}
-	targets := map[string]*state.Repo{}
-	for _, q := range a.pos {
-		hits := poolHits(ctx, q)
-		if len(hits) == 0 {
-			fmt.Fprintf(os.Stderr, "没有匹配到仓库: %s\n", q)
-			continue
-		}
-		for _, h := range hits {
-			targets[h.ID] = h
-		}
-	}
-	if len(targets) == 0 {
-		return 1
-	}
-
-	list := make([]*state.Repo, 0, len(targets))
-	for _, r := range targets {
-		list = append(list, r)
-	}
-	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
-
-	fmt.Printf("将要修改 %d 个仓库:\n", len(list))
-	v := render.View{Roots: ctx.cfg.Roots, Width: 110, Full: true}
-	for _, r := range list {
-		fmt.Println("  " + v.Row(r))
-	}
-	if len(list) > 1 && !a.has("yes", "y") {
-		if !confirmPrompt(ctx, fmt.Sprintf("确认修改这 %d 个? [y/N] ", len(list))) {
-			fmt.Println("已取消。")
-			return 0
-		}
-	}
-
-	group, hasGroup := a.kv["group"]
-	//statusArg, hasStatus := a.kv["status"]
-	addTags := splitList(a.str("", "tag", "tags"))
-	delTags := splitList(a.str("", "untag", "untags"))
-	note, hasNote := a.kv["note"]
-	dropNote := a.has("clear_note")
-	dropGroup := a.has("clear_group")
-	ignore := a.has("ignore")
-	unignore := a.has("unignore")
-	dropTags := a.has("clear_tags")
-
-	now := time.Now().Format(time.RFC3339)
-	for _, r := range list {
-		if hasGroup {
-			r.Group = strings.TrimSpace(group)
-		}
-		if dropGroup {
-			r.Group = ""
-		}
-		if dropTags {
-			r.Tags = nil
-		}
-		for _, t := range addTags {
-			if !hasTag(r, t) {
-				r.Tags = append(r.Tags, t)
-			}
-		}
-		for _, t := range delTags {
-			r.Tags = removeTag(r, t)
-		}
-		if hasNote {
-			r.Note = note
-		}
-		if dropNote {
-			r.Note = ""
-		}
-		if ignore {
-			r.Ignored = true
-		}
-		if unignore {
-			r.Ignored = false
-		}
-		if hasGroup || len(addTags) > 0 || len(delTags) > 0 || hasNote || ignore || unignore {
-			r.ReviewedAt = now
-		}
-		state.Canonicalize(r)
-	}
-	if err := ctx.state.Save(); err != nil {
-		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
-		return 1
-	}
-	fmt.Printf("已更新 %d 个仓库 -> %s\n", len(list), ctx.state.Path())
-	if ctx.res != nil && ctx.res.IsHidden && hasGroup {
-		fmt.Println("提示: 当前目录处于 hide 隐藏状态。如需正式纳入日常大盘视野，请执行 'unhide' 解封本目录。")
-	}
-	return 0
-}
-
 // printAllGroupsWithHints 列出所有分组并附带交互式引导提示。
 func printAllGroupsWithHints(ctx *appCtx) int {
 	all := ctx.state.AllGroups()
 	if len(all) == 0 {
-		fmt.Println("当前尚未创建任何分组。可用 'group new <名称>' 或 'set --group=<名称>' 创建。")
+		fmt.Println("当前尚未创建任何分组。可用 'group new <名称>' 或 'group 交互面板' 创建。")
 		return 0
 	}
 	groups := map[string]int{}
@@ -4070,21 +3967,6 @@ func cmdTig(ctx *appCtx, a args) int {
 	return 0
 }
 
-// makeOpenTig 面板里按 g 时用的动作。跟命令走同一套 Decide / Launch，
-// 只是回显短一些 —— 面板底部只有一行。
-func makeOpenTig(ctx *appCtx) tui.OpenTig {
-	return func(r *state.Repo) (string, error) {
-		v, err := tig.Decide(r, "auto")
-		if err != nil {
-			return "", err
-		}
-		if _, err := tig.Launch(ctx.cfg, r, v); err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("%s 视图 · %s", v.String(), v.Why), nil
-	}
-}
-
 func cmdRm(ctx *appCtx, a args) int {
 	if len(a.pos) == 0 {
 		fmt.Println("用法: igit rm <关键字>   （只从清单移除，不动磁盘）")
@@ -4477,35 +4359,6 @@ func cmdExport(ctx *appCtx, a args) int {
 	outPath := a.str("", "out", "o")
 	if outPath != "" {
 		fmt.Printf("已导出 %d 条 -> %s\n", len(repos), outPath)
-	}
-	return 0
-}
-
-// ---------------------------------------------------------------- triage
-
-func cmdTriage(ctx *appCtx, a args) int {
-	initial := a.str("", "filter", "q")
-	preset := normalizeStatus(a.str("", "status"))
-	save := func() error { return ctx.state.Save() }
-
-	// 面板只在当前作用域这批仓库里工作。没限定就全集，标题栏不显示范围。
-	subset := scopeRepos(ctx)
-	label := ""
-	if ctx.res == nil {
-		fmt.Println("（当前目录不在扫描范围内，这次按全集处理）")
-	} else if !ctx.res.Scope.IsRoot() {
-		label = scopeLabel(ctx.res)
-		fmt.Printf("作用域  %s · %d 个仓库\n", label, ctx.res.Totals.Repos)
-	}
-	if err := tui.Run(ctx.state, ctx.cfg.Roots, initial, preset, subset, label, save, makeOpenTig(ctx)); err != nil {
-		fmt.Fprintf(os.Stderr, "面板启动失败: %v\n", err)
-		return 1
-	}
-	fmt.Println()
-	if subset != nil {
-		fmt.Printf("本作用域内待处理还剩 %d 个。\n", pendingCount(ctx.state, subset))
-	} else {
-		fmt.Printf("待处理还剩 %d 个。\n", pendingCount(ctx.state, nil))
 	}
 	return 0
 }

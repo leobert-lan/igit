@@ -27,7 +27,7 @@ var StatusList = []string{StatusNew, StatusActive, StatusDone, StatusArchived}
 
 // Repo 一条仓库记录。成段划分：
 // 上半部分是扫描出来的客观事实（每次扫描会覆盖），
-// 下半部分是人工处理的结论（扫描不会动，只能通过 set/triage 改）。
+// 下半部分是人工处理的结论（扫描不会动，只能通过 tag/group/set 等改）。
 type Repo struct {
 	ID   string `json:"id"`
 	Path string `json:"path"`

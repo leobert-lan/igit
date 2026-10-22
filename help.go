@@ -25,7 +25,7 @@ const helpOverviewText = `igit - 本地 git 仓库扫描与整理工具 (v` + ve
 
 核心命令 (按层次分组):
   导航 (Navigation)   cd <作用域> | ls | pwd
-  浏览 (Explore)      list | tree | stats | triage (TUI面板)
+  浏览 (Explore)      list | tree | stats
   整理 (Triage)       tag | group | status | note | set
   动作 (Actions)      open | tig | export
   自管理 (GitOps)     ignore | remote | fetch | pull | commit | push
@@ -115,7 +115,6 @@ const helpTopicTigText = `[专题] tig 智能联动指南 (igit help tig)
 操作与快捷键:
   站在集合作用域时:    后接关键字模糊匹配 (多命中时列出候选编号供选择)
   站在单仓作用域时:    直接敲 tig 打开
-  triage (TUI) 面板中: 按 g 直接打开当前光标所指仓库
 
 配置项:
   igit config set tig-exe=<路径>    tig 不在 PATH 时指定其完整路径
@@ -216,15 +215,6 @@ var commandHelps = map[string]string{
   --group=X      按分组过滤
   --tag=X        按标签过滤
   --status=X     按状态过滤`,
-
-	"triage": `igit triage (别名 tui) - 交互式整理面板
-
-用法:
-  igit triage [选项]
-
-说明:
-  进入全屏交互整理面板，支持逐个判别仓库、快速分组、打标签与归档。
-  在面板中按 'g' 键可直接在外部唤起 tig 检视当前仓库。`,
 
 	"export": `igit export - 导出数据资产与健康治理报告
 
