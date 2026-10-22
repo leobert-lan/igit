@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -109,5 +111,161 @@ func TestCmdCommitCleanCheck(t *testing.T) {
 	code := cmdCommit(ctx, args{pos: []string{"test commit"}})
 	if code != 0 {
 		t.Errorf("clean repo cmdCommit should return 0, got %d", code)
+	}
+}
+
+
+func TestRemoteTokenAESEncryption(t *testing.T) {
+	dir := t.TempDir()
+	_ = exec.Command("git", "init", dir).Run()
+	r := &state.Repo{
+		ID:   util.NormalizePath(dir),
+		Path: dir,
+		Name: "test_token_repo",
+	}
+	st := &state.State{Repos: []*state.Repo{r}}
+	sc, _ := scope.Parse("file:" + dir)
+	res, _ := scope.Resolve(sc, st)
+
+	cfg := config.Default()
+	cfgPath := t.TempDir() + "/config.json"
+	ctx := &appCtx{
+		state:   st,
+		res:     res,
+		cfg:     cfg,
+		cfgPath: cfgPath,
+	}
+
+	// 1. 设置仓库级 Token
+	plainToken := "ghp_secureToken1234567890"
+	code := cmdRemote(ctx, args{pos: []string{"token", "origin", plainToken}})
+	if code != 0 {
+		t.Fatalf("cmdRemote token origin failed: code %d", code)
+	}
+
+	// 验证 config 中存的是密文，而不是明文
+	key := r.ID + "#origin"
+	encVal := ctx.cfg.RepoTokens[key]
+	if encVal == "" {
+		t.Fatalf("RepoTokens[%s] is empty", key)
+	}
+	if encVal == plainToken {
+		t.Fatalf("RepoTokens stored in plain text!")
+	}
+
+	// 验证解密获取
+	recovered := ctx.cfg.ResolveToken(r.ID, "origin", "github.com")
+	if recovered != plainToken {
+		t.Fatalf("expected recovered token %s, got %s", plainToken, recovered)
+	}
+
+	// 2. 设置 Host 级 Token
+	hostToken := "glpat-secretGitlabToken"
+	code = cmdRemote(ctx, args{pos: []string{"host-token", "gitlab.com", hostToken}})
+	if code != 0 {
+		t.Fatalf("cmdRemote host-token failed: code %d", code)
+	}
+
+	encHost := ctx.cfg.HostTokens["gitlab.com"]
+	if encHost == "" || encHost == hostToken {
+		t.Fatalf("HostTokens not properly encrypted: %s", encHost)
+	}
+	recoveredHost := ctx.cfg.GetHostToken("gitlab.com")
+	if recoveredHost != hostToken {
+		t.Fatalf("expected %s, got %s", hostToken, recoveredHost)
+	}
+
+	// 3. 清理 Token
+	code = cmdRemote(ctx, args{pos: []string{"clear-token", "origin"}})
+	if code != 0 {
+		t.Fatalf("clear-token failed: code %d", code)
+	}
+	if ctx.cfg.GetRepoToken(r.ID, "origin") != "" {
+		t.Fatalf("repo token should be cleared")
+	}
+}
+
+func TestZeroRemoteHandling(t *testing.T) {
+	dir := t.TempDir()
+	_ = exec.Command("git", "init", dir).Run()
+	r := &state.Repo{
+		ID:   util.NormalizePath(dir),
+		Path: dir,
+		Name: "test_zero_remotes",
+	}
+	st := &state.State{Repos: []*state.Repo{r}}
+	sc, _ := scope.Parse("file:" + dir)
+	res, _ := scope.Resolve(sc, st)
+
+	ctx := &appCtx{
+		state: st,
+		res:   res,
+		cfg:   config.Default(),
+	}
+
+	// 0 个远端时，fetch / pull / push 应优雅拦截提示并返回 0，不崩溃
+	if c := cmdFetch(ctx, args{}); c != 0 {
+		t.Errorf("zero remote cmdFetch expected 0, got %d", c)
+	}
+	if c := cmdPull(ctx, args{}); c != 0 {
+		t.Errorf("zero remote cmdPull expected 0, got %d", c)
+	}
+	if c := cmdPush(ctx, args{}); c != 0 {
+		t.Errorf("zero remote cmdPush expected 0, got %d", c)
+	}
+}
+
+func TestRemoteInteractiveCenterAndPrompts(t *testing.T) {
+	dir := t.TempDir()
+	_ = exec.Command("git", "init", dir).Run()
+	_ = exec.Command("git", "-C", dir, "remote", "add", "origin", "https://github.com/foo/bar.git").Run()
+
+	r := &state.Repo{
+		ID:   util.NormalizePath(dir),
+		Path: dir,
+		Name: "test_interactive_repo",
+	}
+	st := &state.State{Repos: []*state.Repo{r}}
+	sc, _ := scope.Parse("file:" + dir)
+	res, _ := scope.Resolve(sc, st)
+
+	cfg := config.Default()
+	cfgPath := t.TempDir() + "/config.json"
+	ctx := &appCtx{
+		state:   st,
+		res:     res,
+		cfg:     cfg,
+		cfgPath: cfgPath,
+		repl:    true, // 模拟 REPL 交互环境
+	}
+
+	// 1. 测试裸敲 remote 进入交互控制面板，输入 0 安全退出
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("0\n"))
+	code := cmdRemote(ctx, args{})
+	if code != 0 {
+		t.Fatalf("cmdRemote interactive exit expected 0, got %d", code)
+	}
+
+	// 2. 测试 remote token 省略参数时，交互提示并读取输入
+	testToken := "ghp_interactive_secret_123"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader(testToken + "\n"))
+	code = cmdRemote(ctx, args{pos: []string{"token"}})
+	if code != 0 {
+		t.Fatalf("cmdRemote interactive token expected 0, got %d", code)
+	}
+	if recovered := ctx.cfg.ResolveToken(r.ID, "origin", "github.com"); recovered != testToken {
+		t.Fatalf("expected token %s, got %s", testToken, recovered)
+	}
+
+	// 3. 测试 remote host-token 省略参数时，交互提示域名和 token
+	hostDomain := "gitlab.example.com"
+	hostSecret := "glpat_interactive_456"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader(hostDomain + "\n" + hostSecret + "\n"))
+	code = cmdRemote(ctx, args{pos: []string{"host-token"}})
+	if code != 0 {
+		t.Fatalf("cmdRemote interactive host-token expected 0, got %d", code)
+	}
+	if recoveredHost := ctx.cfg.GetHostToken(hostDomain); recoveredHost != hostSecret {
+		t.Fatalf("expected host token %s, got %s", hostSecret, recoveredHost)
 	}
 }

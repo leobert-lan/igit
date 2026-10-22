@@ -4,12 +4,13 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
 	"grscan/internal/config"
 	"grscan/internal/gitinfo"
+	"grscan/internal/pick"
 	"grscan/internal/scope"
 	"grscan/internal/state"
 )
@@ -57,6 +58,18 @@ func refreshRepoState(ctx *appCtx, r *state.Repo) {
 		if ctx.state != nil {
 			_ = ctx.state.Save()
 		}
+	}
+}
+
+func resolveRepoAuth(ctx *appCtx, r *state.Repo, rd gitinfo.RemoteDetail) gitinfo.GitAuthContext {
+	user := rd.User
+	if user == "" && rd.Host != "" && ctx.cfg.HostUsers != nil {
+		user = ctx.cfg.HostUsers[rd.Host]
+	}
+	token := ctx.cfg.ResolveToken(r.ID, rd.Name, rd.Host)
+	return gitinfo.GitAuthContext{
+		User:  user,
+		Token: token,
 	}
 }
 
@@ -160,6 +173,16 @@ func cmdIgnore(ctx *appCtx, a args) int {
 
 // ---------------------------------------------------------------- remote
 
+func isInteractiveMode(ctx *appCtx, a args) bool {
+	if a.has("batch", "quiet") {
+		return false
+	}
+	if ctx != nil && (ctx.repl || ctx.rl != nil) {
+		return true
+	}
+	return isTerminal(os.Stdin)
+}
+
 func cmdRemote(ctx *appCtx, a args) int {
 	r := targetRepoForOps(ctx, "remote", a)
 	if r == nil {
@@ -171,10 +194,20 @@ func cmdRemote(ctx *appCtx, a args) int {
 		sub = strings.ToLower(a.pos[0])
 	}
 
+	interactive := isInteractiveMode(ctx, a)
+
 	switch sub {
 	case "user", "set-user":
-		// remote user [remote_name] [username]
-		// 如果只给了一个参数，则视为 username（remote 默认为 origin）
+		remotes, err := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "获取远端失败: %v\n", err)
+			return 1
+		}
+		if len(remotes) == 0 {
+			fmt.Printf("仓库 %s 尚未配置任何远端，请先添加远端。\n", r.Name)
+			return 1
+		}
+
 		remoteName := "origin"
 		userName := ""
 		argsList := a.pos[1:]
@@ -183,30 +216,56 @@ func cmdRemote(ctx *appCtx, a args) int {
 		} else if len(argsList) >= 2 {
 			remoteName = argsList[0]
 			userName = argsList[1]
-		} else {
-			// 未给任何参数：尝试从配置中寻找已记住的 Host 账号
-			remotes, err := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
-			if err == nil && len(remotes) > 0 {
-				h := remotes[0].Host
-				if remembered, ok := ctx.cfg.HostUsers[h]; ok && remembered != "" {
-					userName = remembered
+		}
+
+		// 缺少用户名且处于交互模式：主动交互式询问
+		if userName == "" && interactive {
+			if len(remotes) > 1 {
+				fmt.Println("当前可用远端:")
+				for i, rd := range remotes {
+					fmt.Printf("  %d) %s (%s)\n", i+1, rd.Name, rd.PushURL)
+				}
+				idxStr := readPrompt(ctx, fmt.Sprintf("请选择远端编号 (默认 1 / %s): ", remotes[0].Name))
+				if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
+					remoteName = remotes[idx-1].Name
+				} else {
 					remoteName = remotes[0].Name
-					fmt.Printf("采用域名 %s 已记忆的账号 [%s]\n", h, remembered)
+				}
+			} else {
+				remoteName = remotes[0].Name
+			}
+
+			// 检查是否有 Host 记忆账号
+			defaultUser := ""
+			for _, rd := range remotes {
+				if rd.Name == remoteName && rd.Host != "" && ctx.cfg.HostUsers != nil {
+					defaultUser = ctx.cfg.HostUsers[rd.Host]
+					break
 				}
 			}
+			promptMsg := fmt.Sprintf("请输入远端 [%s] 的用户名", remoteName)
+			if defaultUser != "" {
+				promptMsg += fmt.Sprintf(" (回车默认使用 [%s])", defaultUser)
+			}
+			promptMsg += ": "
+			inputUser := readPrompt(ctx, promptMsg)
+			if inputUser == "" {
+				userName = defaultUser
+			} else {
+				userName = inputUser
+			}
 		}
+
 		if userName == "" {
 			fmt.Println("用法: remote user [远端名] <用户名>")
-			fmt.Println("  例: remote user zhangsan")
-			fmt.Println("  例: remote user origin zhangsan")
 			return 2
 		}
+
 		oldURL, newURL, err := gitinfo.SetRemoteUser(r.Path, ctx.cfg.GitExe, remoteName, userName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "设置失败: %v\n", err)
 			return 1
 		}
-		// 提取 host 并记录到全局配置
 		_, host, _ := gitinfo.ParseRemoteURL(newURL)
 		if host != "" {
 			if ctx.cfg.HostUsers == nil {
@@ -215,88 +274,355 @@ func cmdRemote(ctx *appCtx, a args) int {
 			ctx.cfg.HostUsers[host] = userName
 			_ = config.Save(ctx.cfgPath, ctx.cfg)
 		}
-		fmt.Printf("已更新远端 %s:\n", remoteName)
-		fmt.Printf("  旧地址: %s\n", oldURL)
-		fmt.Printf("  新地址: %s\n", newURL)
+		fmt.Printf("✅ 已更新远端 [%s]:\n  旧地址: %s\n  新地址: %s\n", remoteName, oldURL, newURL)
 		if host != "" {
 			fmt.Printf("💡 已记住域名 %s 常用账号为 [%s]，后续同域名仓库 push 仅需输密码。\n", host, userName)
 		}
 		refreshRepoState(ctx, r)
 		return 0
 
-	case "remember":
-		// remote remember <host> <user>
-		if len(a.pos) < 3 {
-			fmt.Println("用法: remote remember <域名> <用户名>")
-			fmt.Println("  例: remote remember gitlab.mycompany.com zhangsan")
+	case "token", "set-token":
+		remoteName := "origin"
+		tokenVal := ""
+		argsList := a.pos[1:]
+		if len(argsList) == 1 {
+			tokenVal = argsList[0]
+		} else if len(argsList) >= 2 {
+			remoteName = argsList[0]
+			tokenVal = argsList[1]
+		}
+
+		if tokenVal == "" && interactive {
+			remotes, _ := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+			if len(remotes) > 1 {
+				fmt.Println("当前可用远端:")
+				for i, rd := range remotes {
+					fmt.Printf("  %d) %s (%s)\n", i+1, rd.Name, rd.PushURL)
+				}
+				idxStr := readPrompt(ctx, fmt.Sprintf("请选择远端编号 (默认 1 / %s): ", remotes[0].Name))
+				if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
+					remoteName = remotes[idx-1].Name
+				} else {
+					remoteName = remotes[0].Name
+				}
+			} else if len(remotes) == 1 {
+				remoteName = remotes[0].Name
+			}
+			tokenVal = readPrompt(ctx, fmt.Sprintf("请输入远端 [%s] 的访问 Token (AES-256-GCM 加密存储): ", remoteName))
+		}
+
+		if tokenVal == "" {
+			fmt.Println("用法: remote token [远端名] <Token>")
 			return 2
 		}
-		host := a.pos[1]
-		user := a.pos[2]
+
+		if err := ctx.cfg.SetRepoToken(r.ID, remoteName, tokenVal); err != nil {
+			fmt.Fprintf(os.Stderr, "保存 Token 失败: %v\n", err)
+			return 1
+		}
+		_ = config.Save(ctx.cfgPath, ctx.cfg)
+		fmt.Printf("✅ 已加密保存仓库 %s 远端 [%s] 的访问 Token (AES-256-GCM 保护)。\n后续 push/fetch/pull 将自动鉴权。\n", r.Name, remoteName)
+		return 0
+
+	case "host-token":
+		host := ""
+		tokenVal := ""
+		if len(a.pos) >= 3 {
+			host = a.pos[1]
+			tokenVal = a.pos[2]
+		} else if len(a.pos) == 2 {
+			host = a.pos[1]
+		}
+
+		if (host == "" || tokenVal == "") && interactive {
+			if host == "" {
+				host = readPrompt(ctx, "请输入平台域名 (如 github.com 或 gitlab.mycorp.com): ")
+			}
+			if host != "" && tokenVal == "" {
+				tokenVal = readPrompt(ctx, fmt.Sprintf("请输入域名 [%s] 的全局默认访问 Token: ", host))
+			}
+		}
+
+		if host == "" || tokenVal == "" {
+			fmt.Println("用法: remote host-token <域名> <Token>")
+			fmt.Println("  例: remote host-token github.com ghp_xxxx")
+			return 2
+		}
+
+		if err := ctx.cfg.SetHostToken(host, tokenVal); err != nil {
+			fmt.Fprintf(os.Stderr, "保存 Host Token 失败: %v\n", err)
+			return 1
+		}
+		_ = config.Save(ctx.cfgPath, ctx.cfg)
+		fmt.Printf("✅ 已加密保存域名 [%s] 全局访问 Token (AES-256-GCM 保护)。\n", host)
+		return 0
+
+	case "clear-token":
+		remoteName := "origin"
+		if len(a.pos) >= 2 {
+			remoteName = a.pos[1]
+		} else if interactive {
+			remotes, _ := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+			if len(remotes) > 1 {
+				fmt.Println("选择要清除 Token 的远端:")
+				for i, rd := range remotes {
+					fmt.Printf("  %d) %s\n", i+1, rd.Name)
+				}
+				idxStr := readPrompt(ctx, "请选择编号: ")
+				if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
+					remoteName = remotes[idx-1].Name
+				}
+			}
+		}
+		_ = ctx.cfg.SetRepoToken(r.ID, remoteName, "")
+		_ = config.Save(ctx.cfgPath, ctx.cfg)
+		fmt.Printf("已清除仓库 %s 远端 [%s] 的 Token 配置。\n", r.Name, remoteName)
+		return 0
+
+	case "remember":
+		host := ""
+		user := ""
+		if len(a.pos) >= 3 {
+			host = a.pos[1]
+			user = a.pos[2]
+		} else if interactive {
+			host = readPrompt(ctx, "请输入域名 (如 github.com): ")
+			user = readPrompt(ctx, fmt.Sprintf("请输入域名 [%s] 对应的常用用户名: ", host))
+		}
+		if host == "" || user == "" {
+			fmt.Println("用法: remote remember <域名> <用户名>")
+			return 2
+		}
 		if ctx.cfg.HostUsers == nil {
 			ctx.cfg.HostUsers = map[string]string{}
 		}
 		ctx.cfg.HostUsers[host] = user
 		_ = config.Save(ctx.cfgPath, ctx.cfg)
-		fmt.Printf("已记住域名 %s 对应常用账号为 [%s]\n", host, user)
+		fmt.Printf("✅ 已记住域名 %s 对应常用账号为 [%s]\n", host, user)
 		return 0
 
 	case "clear-user":
 		remoteName := "origin"
 		if len(a.pos) >= 2 {
 			remoteName = a.pos[1]
+		} else if interactive {
+			remotes, _ := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+			if len(remotes) > 1 {
+				fmt.Println("选择要清除用户名的远端:")
+				for i, rd := range remotes {
+					fmt.Printf("  %d) %s\n", i+1, rd.Name)
+				}
+				idxStr := readPrompt(ctx, "请选择编号: ")
+				if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
+					remoteName = remotes[idx-1].Name
+				}
+			}
 		}
 		_, newURL, err := gitinfo.SetRemoteUser(r.Path, ctx.cfg.GitExe, remoteName, "")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "清除用户名失败: %v\n", err)
 			return 1
 		}
-		fmt.Printf("已清除远端 %s 的嵌入用户名，当前地址: %s\n", remoteName, newURL)
+		fmt.Printf("已清除远端 [%s] 的嵌入用户名，当前地址: %s\n", remoteName, newURL)
 		refreshRepoState(ctx, r)
 		return 0
 
-	default:
-		// 默认 list 远端详情
+	case "add":
+		name := ""
+		urlStr := ""
+		if len(a.pos) >= 3 {
+			name = a.pos[1]
+			urlStr = a.pos[2]
+		} else if interactive {
+			name = readPrompt(ctx, "请输入新远端名称 (默认 origin): ")
+			if name == "" {
+				name = "origin"
+			}
+			urlStr = readPrompt(ctx, "请输入远端地址 (URL): ")
+		}
+		if name == "" || urlStr == "" {
+			fmt.Println("用法: remote add <远端名> <URL>")
+			return 2
+		}
+		if err := gitinfo.AddRemote(r.Path, ctx.cfg.GitExe, name, urlStr); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			return 1
+		}
+		fmt.Printf("✅ 已为仓库 %s 添加远端 [%s] -> %s\n", r.Name, name, urlStr)
+		refreshRepoState(ctx, r)
+		return 0
+
+	case "rm", "remove":
+		name := ""
+		if len(a.pos) >= 2 {
+			name = a.pos[1]
+		} else if interactive {
+			remotes, _ := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+			if len(remotes) == 0 {
+				fmt.Println("当前仓库没有可删除的远端。")
+				return 0
+			}
+			fmt.Println("选择要删除的远端:")
+			for i, rd := range remotes {
+				fmt.Printf("  %d) %s (%s)\n", i+1, rd.Name, rd.PushURL)
+			}
+			idxStr := readPrompt(ctx, "请选择编号: ")
+			if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
+				name = remotes[idx-1].Name
+			}
+		}
+		if name == "" {
+			fmt.Println("用法: remote rm <远端名>")
+			return 2
+		}
+		if interactive && !confirmPrompt(ctx, fmt.Sprintf("确认删除远端 [%s] 吗? [y/N]: ", name)) {
+			fmt.Println("已取消。")
+			return 0
+		}
+		if err := gitinfo.RemoveRemote(r.Path, ctx.cfg.GitExe, name); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			return 1
+		}
+		fmt.Printf("✅ 已从仓库 %s 删除远端 [%s]\n", r.Name, name)
+		refreshRepoState(ctx, r)
+		return 0
+
+	case "list", "show":
 		remotes, err := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "获取远端失败: %v\n", err)
 			return 1
 		}
-		if len(remotes) == 0 {
-			fmt.Printf("仓库 %s 尚未配置任何远端仓库。\n", r.Name)
-			return 0
-		}
-		fmt.Printf("远端配置清单 (%s · %d 个远端):\n", r.Name, len(remotes))
-		var suggestHost, suggestUser, suggestRemote string
-		for _, rd := range remotes {
-			userTag := "[未绑定用户]"
-			if rd.User != "" {
-				userTag = fmt.Sprintf("[已绑定用户: %s · Push免输用户]", rd.User)
-			} else if rd.Host != "" && ctx.cfg.HostUsers != nil {
-				if remembered, ok := ctx.cfg.HostUsers[rd.Host]; ok && remembered != "" {
-					suggestHost = rd.Host
-					suggestUser = remembered
-					suggestRemote = rd.Name
-				}
-			}
-			fmt.Printf("  %-10s %s\n", rd.Name, rd.FetchURL)
-			if rd.PushURL != "" && rd.PushURL != rd.FetchURL {
-				fmt.Printf("             push -> %s\n", rd.PushURL)
-			}
-			fmt.Printf("             %s\n", userTag)
-		}
-		if suggestUser != "" {
-			fmt.Printf("\n💡 提示: 域名 %s 记忆的常用账号为 [%s]，可敲  remote user %s %s  一键绑定\n",
-				suggestHost, suggestUser, suggestRemote, suggestUser)
-		}
+		printRemoteDetails(ctx, r, remotes)
 		return 0
+
+	default:
+		// 只要在交互环境中敲 remote（无论是否有其他未知子参数），直接进入交互控制中心
+		if interactive {
+			return remoteInteractive(ctx, r)
+		}
+		remotes, err := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "获取远端失败: %v\n", err)
+			return 1
+		}
+		printRemoteDetails(ctx, r, remotes)
+		return 0
+	}
+}
+
+func printRemoteDetails(ctx *appCtx, r *state.Repo, remotes []gitinfo.RemoteDetail) {
+	if len(remotes) == 0 {
+		fmt.Printf("仓库 %s 尚未配置任何远端仓库。\n", r.Name)
+		return
+	}
+	fmt.Printf("远端配置清单 (%s · %d 个远端):\n", r.Name, len(remotes))
+	for _, rd := range remotes {
+		userTag := "[未绑定用户]"
+		if rd.User != "" {
+			userTag = fmt.Sprintf("[已绑定用户: %s]", rd.User)
+		} else if rd.Host != "" && ctx.cfg.HostUsers != nil {
+			if remembered, ok := ctx.cfg.HostUsers[rd.Host]; ok && remembered != "" {
+				userTag = fmt.Sprintf("[Host记忆账号: %s]", remembered)
+			}
+		}
+
+		tokenTag := "[未配置Token]"
+		if repoTok := ctx.cfg.GetRepoToken(r.ID, rd.Name); repoTok != "" {
+			tokenTag = "[已配仓库专有Token(AES保护)]"
+		} else if hostTok := ctx.cfg.GetHostToken(rd.Host); hostTok != "" {
+			tokenTag = "[已配Host全局Token(AES保护)]"
+		}
+
+		fmt.Printf("  %-10s %s\n", rd.Name, rd.FetchURL)
+		if rd.PushURL != "" && rd.PushURL != rd.FetchURL {
+			fmt.Printf("             push -> %s\n", rd.PushURL)
+		}
+		fmt.Printf("             %s  %s\n", userTag, tokenTag)
+	}
+}
+
+func remoteInteractive(ctx *appCtx, r *state.Repo) int {
+	for {
+		remotes, err := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "获取远端失败: %v\n", err)
+			return 1
+		}
+
+		fmt.Println()
+		fmt.Println("╔═══════════════════════════════════════════════════════════════════╗")
+		fmt.Printf("║               远端管理控制中心: %-33s ║\n", r.Name)
+		fmt.Println("╚═══════════════════════════════════════════════════════════════════╝")
+		printRemoteDetails(ctx, r, remotes)
+		fmt.Println()
+		fmt.Println("操作选项:")
+		fmt.Println("  [1] 👤 绑定远端用户名 (Username)      - 写入 URL，免输用户名")
+		fmt.Println("  [2] 🔑 配置远端访问令牌 (Token)        - AES-256-GCM 加密，Push/Pull 自动鉴权")
+		fmt.Println("  [3] 🌐 配置平台域名默认账号与 Token  - 如 github.com 全局默认凭据")
+		fmt.Println("  [4] ➕ 添加新远端 (git remote add)     - 添加镜像/备份远端")
+		fmt.Println("  [5] ➖ 删除远端 (git remote remove)  - 移除指定远端")
+		fmt.Println("  [6] 🧹 清除指定远端用户或 Token")
+		fmt.Println("  [0] 返回 / 退出管理中心")
+		fmt.Println()
+
+		choice := readPrompt(ctx, "请选择操作 (1-6 / 0 退出): ")
+		switch choice {
+		case "1":
+			cmdRemote(ctx, args{pos: []string{"user"}})
+		case "2":
+			cmdRemote(ctx, args{pos: []string{"token"}})
+		case "3":
+			cmdRemote(ctx, args{pos: []string{"host-token"}})
+		case "4":
+			cmdRemote(ctx, args{pos: []string{"add"}})
+		case "5":
+			cmdRemote(ctx, args{pos: []string{"rm"}})
+		case "6":
+			interactiveClearAuth(ctx, r, remotes)
+		case "0", "q", "quit", "exit", "":
+			return 0
+		default:
+			fmt.Println("无效选项，请输入 1-6 或 0。")
+		}
+	}
+}
+
+func interactiveClearAuth(ctx *appCtx, r *state.Repo, remotes []gitinfo.RemoteDetail) {
+	if len(remotes) == 0 {
+		fmt.Println("当前仓库无远端配置。")
+		return
+	}
+	fmt.Println("清除认证信息:")
+	fmt.Println("  1) 清除远端 URL 中的用户名")
+	fmt.Println("  2) 清除远端专属加密 Token")
+	fmt.Println("  0) 取消返回")
+	sub := readPrompt(ctx, "请选择 (1-2 / 0 取消): ")
+	if sub != "1" && sub != "2" {
+		return
+	}
+	targetName := remotes[0].Name
+	if len(remotes) > 1 {
+		fmt.Println("选择目标远端:")
+		for i, rd := range remotes {
+			fmt.Printf("  %d) %s\n", i+1, rd.Name)
+		}
+		idxStr := readPrompt(ctx, "请选择编号: ")
+		if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
+			targetName = remotes[idx-1].Name
+		}
+	}
+	if sub == "1" {
+		cmdRemote(ctx, args{pos: []string{"clear-user", targetName}})
+	} else if sub == "2" {
+		cmdRemote(ctx, args{pos: []string{"clear-token", targetName}})
 	}
 }
 
 // ---------------------------------------------------------------- fetch
 
 func cmdFetch(ctx *appCtx, a args) int {
-	// 如果是集合作用域且有多个仓库，支持批量抓取
+	// 集合作用域且有多个仓库，走批量抓取
 	if ctx.res != nil && ctx.res.Kind != scope.KindRepo && len(ctx.res.Repos) > 1 && !a.has("repo") && len(a.pos) == 0 {
 		return batchFetch(ctx, a)
 	}
@@ -306,18 +632,80 @@ func cmdFetch(ctx *appCtx, a args) int {
 		return 2
 	}
 
-	remote := ""
-	if len(a.pos) > 0 {
-		remote = a.pos[0]
+	remotes, err := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "获取远端列表失败: %v\n", err)
+		return 1
+	}
+	if len(remotes) == 0 {
+		fmt.Printf("⚠️ 仓库 %s 尚未配置任何远端仓库 (remote)。\n", r.Name)
+		fmt.Println("提示: 可输入 'remote' 进行交互式配置，或执行 'git remote add <名称> <URL>'。")
+		return 0
 	}
 
-	fmt.Printf("正在拉取 %s 远端更新...\n", r.Name)
+	// 1. 命令行显式指定了远端，如 fetch origin
+	if len(a.pos) > 0 {
+		targetName := a.pos[0]
+		var targetRD *gitinfo.RemoteDetail
+		for i := range remotes {
+			if strings.EqualFold(remotes[i].Name, targetName) {
+				targetRD = &remotes[i]
+				break
+			}
+		}
+		if targetRD == nil {
+			fmt.Fprintf(os.Stderr, "未找到名为 %s 的远端配置。\n", targetName)
+			return 1
+		}
+		return fetchSingleRemote(ctx, r, *targetRD)
+	}
+
+	// 2. 单远端直通
+	if len(remotes) == 1 {
+		return fetchSingleRemote(ctx, r, remotes[0])
+	}
+
+	// 3. 多远端全量抓取
+	fmt.Printf("仓库 %s 检测到 %d 个远端，开始全量抓取更新...\n", r.Name, len(remotes))
+	success, failed := 0, 0
+	for _, rd := range remotes {
+		auth := resolveRepoAuth(ctx, r, rd)
+		tokenHint := ""
+		if auth.Token != "" {
+			tokenHint = " [已注入Token]"
+		}
+		fmt.Printf("  -> 正在抓取 [%s] (%s)%s...\n", rd.Name, rd.FetchURL, tokenHint)
+		msg, err := gitinfo.GitFetchWithAuth(r.Path, ctx.cfg.GitExe, rd.Name, auth)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "     [%s] 抓取失败: %v\n", rd.Name, err)
+			failed++
+		} else {
+			if msg != "" {
+				fmt.Printf("     %s\n", msg)
+			}
+			success++
+		}
+	}
+	refreshRepoState(ctx, r)
+	fmt.Printf("全量拉取完成: 成功 %d 个远端，失败 %d 个。\n", success, failed)
+	printTopologySummary(r)
+	return 0
+}
+
+func fetchSingleRemote(ctx *appCtx, r *state.Repo, rd gitinfo.RemoteDetail) int {
+	auth := resolveRepoAuth(ctx, r, rd)
+	tokenHint := ""
+	if auth.Token != "" {
+		tokenHint = " (采用配置 Token 免密)"
+	}
+	fmt.Printf("正在拉取 %s 远端 [%s] 更新%s...\n", r.Name, rd.Name, tokenHint)
+
 	var err error
 	if isTerminal(os.Stdin) {
-		err = gitinfo.GitFetchInteractive(r.Path, ctx.cfg.GitExe, remote)
+		err = gitinfo.GitFetchInteractiveWithAuth(r.Path, ctx.cfg.GitExe, rd.Name, auth)
 	} else {
 		var msg string
-		msg, err = gitinfo.GitFetch(r.Path, ctx.cfg.GitExe, remote)
+		msg, err = gitinfo.GitFetchWithAuth(r.Path, ctx.cfg.GitExe, rd.Name, auth)
 		if msg != "" {
 			fmt.Println(msg)
 		}
@@ -326,11 +714,13 @@ func cmdFetch(ctx *appCtx, a args) int {
 		fmt.Fprintf(os.Stderr, "fetch 失败: %v\n", err)
 		return 1
 	}
-
 	refreshRepoState(ctx, r)
+	printTopologySummary(r)
+	return 0
+}
 
-	// 打印直观拓扑结论
-	fmt.Printf("拉取完成。当前状态: ")
+func printTopologySummary(r *state.Repo) {
+	fmt.Printf("当前状态: ")
 	switch {
 	case r.Ahead == 0 && r.Behind == 0:
 		fmt.Println("与远端保持最新。")
@@ -343,7 +733,6 @@ func cmdFetch(ctx *appCtx, a args) int {
 	default:
 		fmt.Printf("分支 %s\n", r.Branch)
 	}
-	return 0
 }
 
 func batchFetch(ctx *appCtx, a args) int {
@@ -358,7 +747,12 @@ func batchFetch(ctx *appCtx, a args) int {
 		if r.PrimaryURL == "" {
 			continue
 		}
-		_, err := gitinfo.GitFetch(r.Path, ctx.cfg.GitExe, "")
+		remotes, err := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+		if err != nil || len(remotes) == 0 {
+			continue
+		}
+		auth := resolveRepoAuth(ctx, r, remotes[0])
+		_, err = gitinfo.GitFetchWithAuth(r.Path, ctx.cfg.GitExe, "", auth)
 		if err != nil {
 			failed++
 			continue
@@ -385,38 +779,107 @@ func cmdPull(ctx *appCtx, a args) int {
 		return 1
 	}
 
-	// 2. 分叉检查（绝不命令行隐式 Merge）
+	// 2. 状态检查（在单元测试或无真实 git 时，通过已记录的 Ahead/Behind 快速预检）
 	if r.Ahead > 0 && r.Behind > 0 {
-		fmt.Fprintf(os.Stderr, "⚠️ 本地与远端已分叉 (领先 %d, 落后 %d)。\n命令行已拦截合并，请使用 JetBrains 或其它可视化工具处理 (可敲 open 打开目录)。\n",
+		fmt.Fprintf(os.Stderr, "⚠️ 快进原则拦截: 本地与远端已分叉 (领先 %d, 落后 %d)。\n已拦截合并，请使用可视化工具 (如 tig / IDE) 处理。\n",
 			r.Ahead, r.Behind)
 		return 1
 	}
 
-	if r.Behind == 0 && r.HasUpstream {
-		fmt.Println("已经是最新版本，无需拉取。")
+	remotes, err := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "获取远端列表失败: %v\n", err)
+		return 1
+	}
+	if len(remotes) == 0 {
+		fmt.Printf("⚠️ 仓库 %s 尚未配置任何远端仓库 (remote)，无法拉取。\n", r.Name)
 		return 0
 	}
 
-	fmt.Printf("正在安全快进拉取 (%s)...\n", r.Name)
-	var pullErr error
-	if isTerminal(os.Stdin) {
-		pullErr = gitinfo.GitPullFFOnlyInteractive(r.Path, ctx.cfg.GitExe)
+	info, _ := gitinfo.GetUpstreamInfo(r.Path, ctx.cfg.GitExe)
+	var targetRD gitinfo.RemoteDetail
+
+	// 3. 确定拉取源远端 (单选)
+	if len(a.pos) > 0 {
+		targetName := a.pos[0]
+		found := false
+		for _, rd := range remotes {
+			if strings.EqualFold(rd.Name, targetName) {
+				targetRD = rd
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "未找到名为 %s 的远端配置。\n", targetName)
+			return 1
+		}
+	} else if len(remotes) == 1 {
+		targetRD = remotes[0]
 	} else {
-		var out string
-		out, pullErr = gitinfo.GitPullFFOnly(r.Path, ctx.cfg.GitExe)
-		if out != "" {
-			fmt.Println(out)
+		// 多远端交互式单选
+		var menuItems []pick.MenuItem
+		for i, rd := range remotes {
+			badge := ""
+			if info.HasUpstream && strings.HasPrefix(info.Upstream, rd.Name+"/") {
+				badge = "[当前追踪]"
+			}
+			menuItems = append(menuItems, pick.MenuItem{
+				Key:    strconv.Itoa(i + 1),
+				Label:  rd.Name,
+				Badge:  badge,
+				Detail: rd.FetchURL,
+				Value:  rd,
+			})
+		}
+		chosen, cancelled := pick.Menu(pick.MenuOpt{
+			Title:       fmt.Sprintf("仓库 %s 包含 %d 个远端，请选择拉取源 (单选 · 方向键移动，回车确认):", r.Name, len(remotes)),
+			Items:       menuItems,
+			Interactive: isTerminal(os.Stdin),
+		})
+		if cancelled || chosen == nil {
+			fmt.Println("已取消拉取。")
+			return 0
+		}
+		targetRD = chosen.Value.(gitinfo.RemoteDetail)
+	}
+
+	// 4. 快进原则与分叉提前预检
+	branch := r.Branch
+	if branch == "" {
+		branch = info.Branch
+	}
+	if branch != "" {
+		ahead, behind, hasRemoteBranch, err := gitinfo.CheckFastForwardStatus(r.Path, ctx.cfg.GitExe, targetRD.Name, branch)
+		if err == nil && hasRemoteBranch {
+			if ahead > 0 && behind > 0 {
+				fmt.Fprintf(os.Stderr, "⚠️ 快进原则拦截: 本地分支 [%s] 与远端 [%s/%s] 已分叉 (本地领先 %d, 落后 %d 个提交)！\n已阻止执行 merge，请使用 JetBrains 或其它可视化工具处理。\n",
+					branch, targetRD.Name, branch, ahead, behind)
+				return 1
+			}
+			if behind == 0 && ahead == 0 {
+				fmt.Printf("当前分支 [%s] 与远端 [%s] 保持最新，无需拉取。\n", branch, targetRD.Name)
+				return 0
+			}
 		}
 	}
+
+	// 5. 执行安全快进拉取
+	auth := resolveRepoAuth(ctx, r, targetRD)
+	tokenHint := ""
+	if auth.Token != "" {
+		tokenHint = " (采用配置 Token 免密)"
+	}
+	fmt.Printf("正在安全快进拉取 [%s] (%s)%s...\n", targetRD.Name, r.Name, tokenHint)
+	pullErr := gitinfo.GitPullFFOnlyWithAuth(r.Path, ctx.cfg.GitExe, targetRD.Name, branch, auth)
 	if pullErr != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", pullErr)
+		fmt.Fprintf(os.Stderr, "拉取失败 (非快进或冲突): %v\n", pullErr)
 		return 1
 	}
 	refreshRepoState(ctx, r)
 	fmt.Println("快进同步完成。")
 	return 0
 }
-
 // ---------------------------------------------------------------- commit
 
 func cmdCommit(ctx *appCtx, a args) int {
@@ -486,47 +949,104 @@ func cmdPush(ctx *appCtx, a args) int {
 		return 2
 	}
 
-	// 1. 检查跟踪分支
-	info, err := gitinfo.GetUpstreamInfo(r.Path, ctx.cfg.GitExe)
-	if err == nil && !info.HasUpstream {
+	remotes, err := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "获取远端列表失败: %v\n", err)
+		return 1
+	}
+	if len(remotes) == 0 {
+		fmt.Printf("⚠️ 仓库 %s 尚未配置任何远端仓库 (remote)，无法推送。\n", r.Name)
+		fmt.Println("提示: 可输入 'remote' 进行交互式配置，或执行 'git remote add <名称> <URL>'。")
+		return 0
+	}
+
+	info, _ := gitinfo.GetUpstreamInfo(r.Path, ctx.cfg.GitExe)
+	var targets []gitinfo.RemoteDetail
+
+	// 1. 命令行显式指定了远端，如 push origin
+	if len(a.pos) > 0 {
+		targetName := a.pos[0]
+		for _, rd := range remotes {
+			if strings.EqualFold(rd.Name, targetName) {
+				targets = append(targets, rd)
+				break
+			}
+		}
+		if len(targets) == 0 {
+			fmt.Fprintf(os.Stderr, "未找到名为 %s 的远端配置。\n", targetName)
+			return 1
+		}
+	} else if len(remotes) == 1 {
+		targets = remotes
+	} else {
+		// 多远端交互式多选 (Bubble Tea 复选菜单)
+		var menuItems []pick.MenuItem
+		for i, rd := range remotes {
+			selected := (strings.EqualFold(rd.Name, "origin") || (info.HasUpstream && strings.HasPrefix(info.Upstream, rd.Name+"/")))
+			badge := ""
+			auth := resolveRepoAuth(ctx, r, rd)
+			if auth.Token != "" {
+				badge = "[Token免密]"
+			}
+			detail := rd.PushURL
+			if detail == "" {
+				detail = rd.FetchURL
+			}
+			menuItems = append(menuItems, pick.MenuItem{
+				Key:      strconv.Itoa(i + 1),
+				Label:    rd.Name,
+				Badge:    badge,
+				Detail:   detail,
+				Selected: selected,
+				Value:    rd,
+			})
+		}
+		picked, cancelled := pick.MultiMenu(pick.MenuOpt{
+			Title:       fmt.Sprintf("仓库 %s 包含 %d 个远端，请选择推送目标 (空格勾选/取消，回车确认):", r.Name, len(remotes)),
+			Items:       menuItems,
+			Interactive: isTerminal(os.Stdin),
+		})
+		if cancelled || len(picked) == 0 {
+			fmt.Println("已取消推送。")
+			return 0
+		}
+		for _, it := range picked {
+			targets = append(targets, it.Value.(gitinfo.RemoteDetail))
+		}
+	}
+
+	// 2. 检查跟踪分支提示
+	if !info.HasUpstream {
 		branch := info.Branch
 		if branch == "" {
 			branch = r.Branch
 		}
-		fmt.Println("远端尚未建立追踪分支，请执行:")
-		fmt.Printf("  git push --set-upstream origin %s\n", branch)
-		return 0
+		fmt.Printf("💡 提示: 当前分支尚未建立远端跟踪关系 (可执行: git push --set-upstream %s %s)\n", targets[0].Name, branch)
 	}
 
-	// 2. 检查远端用户名绑定
-	remotes, _ := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
-	if len(remotes) > 0 && remotes[0].IsHTTPS && remotes[0].User == "" {
-		h := remotes[0].Host
-		if remembered, ok := ctx.cfg.HostUsers[h]; ok && remembered != "" {
-			fmt.Printf("💡 提示: 远端尚未绑定用户名，后续可敲  remote user %s  绑定已记忆账号 [%s]，免输用户名。\n", remotes[0].Name, remembered)
+	extraArgs := []string{}
+	if len(a.pos) > 1 {
+		extraArgs = a.pos[1:]
+	}
+
+	// 3. 依次推送到目标远端
+	for _, target := range targets {
+		auth := resolveRepoAuth(ctx, r, target)
+		tokenHint := "如有密码提示请输入:"
+		if auth.Token != "" {
+			tokenHint = "采用配置 Token 免密推送..."
+		}
+		fmt.Printf("正在推送到远端 [%s] (%s)... %s\n", target.Name, target.PushURL, tokenHint)
+		err := gitinfo.GitPushWithAuth(r.Path, ctx.cfg.GitExe, target.Name, "", extraArgs, auth)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "远端 [%s] 推送失败: %v\n", target.Name, err)
+		} else {
+			fmt.Printf("远端 [%s] 推送成功！\n", target.Name)
 		}
 	}
-
-	fmt.Printf("正在推送到远端 (%s)... 如有密码提示请输入:\n", r.Name)
-	exe := gitinfo.ResolveGit(ctx.cfg.GitExe)
-	cmdArgs := []string{"-C", r.Path, "push"}
-	if len(a.pos) > 0 {
-		cmdArgs = append(cmdArgs, a.pos...)
-	}
-	cmd := exec.Command(exe, cmdArgs...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "推送失败: %v\n", err)
-		return 1
-	}
 	refreshRepoState(ctx, r)
-	fmt.Println("推送成功！")
 	return 0
 }
-
 // ---------------------------------------------------------------- 补全辅助
 
 func untrackedCandidates(ctx *appCtx) []string {

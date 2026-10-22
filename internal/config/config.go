@@ -2,10 +2,13 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"grscan/internal/security"
 )
 
 const CurrentVersion = 1
@@ -31,6 +34,10 @@ type Config struct {
 
 	// HostUsers：域名到默认 HTTPS 用户名的映射记忆（例如 gitlab.corp.com -> zhangsan）
 	HostUsers map[string]string `json:"host_users,omitempty"`
+	// HostTokens：域名到加密 Token 的映射 (AES-GCM 加密)
+	HostTokens map[string]string `json:"host_tokens,omitempty"`
+	// RepoTokens：仓库级远端专属加密 Token，key 为 "repo_id#remote_name"
+	RepoTokens map[string]string `json:"repo_tokens,omitempty"`
 
 	// ExportDir：导出文件的目标存储目录，留空默认为数据目录下的 exports
 	ExportDir string `json:"export_dir,omitempty"`
@@ -89,6 +96,8 @@ func Default() *Config {
 		Jobs:         defaultJobs(),
 		GitExe:       "",
 		HostUsers:    map[string]string{},
+		HostTokens:   map[string]string{},
+		RepoTokens:   map[string]string{},
 	}
 	return c
 }
@@ -194,6 +203,12 @@ func Load(configPath string) (*Config, error) {
 	if c.HostUsers == nil {
 		c.HostUsers = map[string]string{}
 	}
+	if c.HostTokens == nil {
+		c.HostTokens = map[string]string{}
+	}
+	if c.RepoTokens == nil {
+		c.RepoTokens = map[string]string{}
+	}
 	return &c, nil
 }
 
@@ -254,4 +269,83 @@ func sameDir(a, b string) bool {
 	aa, _ := filepath.Abs(a)
 	bb, _ := filepath.Abs(b)
 	return strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
+}
+
+
+func (c *Config) GetHostToken(host string) string {
+	if c == nil || c.HostTokens == nil {
+		return ""
+	}
+	enc, ok := c.HostTokens[strings.ToLower(strings.TrimSpace(host))]
+	if !ok || enc == "" {
+		return ""
+	}
+	dec, err := security.Decrypt(enc)
+	if err != nil {
+		return ""
+	}
+	return dec
+}
+
+func (c *Config) SetHostToken(host, token string) error {
+	if c.HostTokens == nil {
+		c.HostTokens = map[string]string{}
+	}
+	h := strings.ToLower(strings.TrimSpace(host))
+	if token == "" {
+		delete(c.HostTokens, h)
+		return nil
+	}
+	enc, err := security.Encrypt(token)
+	if err != nil {
+		return err
+	}
+	c.HostTokens[h] = enc
+	return nil
+}
+
+func (c *Config) GetRepoToken(repoID, remoteName string) string {
+	if c == nil || c.RepoTokens == nil {
+		return ""
+	}
+	k := fmt.Sprintf("%s#%s", repoID, strings.ToLower(strings.TrimSpace(remoteName)))
+	enc, ok := c.RepoTokens[k]
+	if !ok || enc == "" {
+		return ""
+	}
+	dec, err := security.Decrypt(enc)
+	if err != nil {
+		return ""
+	}
+	return dec
+}
+
+func (c *Config) SetRepoToken(repoID, remoteName, token string) error {
+	if c.RepoTokens == nil {
+		c.RepoTokens = map[string]string{}
+	}
+	k := fmt.Sprintf("%s#%s", repoID, strings.ToLower(strings.TrimSpace(remoteName)))
+	if token == "" {
+		delete(c.RepoTokens, k)
+		return nil
+	}
+	enc, err := security.Encrypt(token)
+	if err != nil {
+		return err
+	}
+	c.RepoTokens[k] = enc
+	return nil
+}
+
+// ResolveToken 优先取仓库级远端 Token，未配则回退到 Host 级 Token。
+func (c *Config) ResolveToken(repoID, remoteName, host string) string {
+	if t := c.GetRepoToken(repoID, remoteName); t != "" {
+		return t
+	}
+	if host != "" {
+		if t := c.GetHostToken(host); t != "" {
+			return t
+		}
+	}
+	return ""
 }

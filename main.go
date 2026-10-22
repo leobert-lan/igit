@@ -28,6 +28,7 @@ import (
 	"grscan/internal/util"
 
 	"github.com/chzyer/readline"
+	"github.com/mattn/go-isatty"
 )
 
 const version = "0.1.0"
@@ -50,6 +51,13 @@ func main() {
 }
 
 func run(raw []string) int {
+	if len(raw) > 0 {
+		first := strings.ToLower(raw[0])
+		if first == "__askpass" || strings.HasPrefix(first, "password for") || strings.HasPrefix(first, "username for") {
+			handleAskPass(raw)
+			return 0
+		}
+	}
 	raw, homeFlag := takeGlobalHome(raw)
 	if len(raw) > 0 {
 		switch raw[0] {
@@ -1489,6 +1497,12 @@ func clearLine(last *int, msg string) {
 }
 
 func isTerminal(f *os.File) bool {
+	if f == nil {
+		return false
+	}
+	if isatty.IsTerminal(f.Fd()) || isatty.IsCygwinTerminal(f.Fd()) {
+		return true
+	}
 	fi, err := f.Stat()
 	if err != nil {
 		return false
@@ -5008,4 +5022,16 @@ func fixedDrives() []string {
 		out = append(out, home)
 	}
 	return out
+}
+
+func handleAskPass(raw []string) {
+	prompt := strings.ToLower(strings.Join(raw, " "))
+	if strings.Contains(prompt, "username") {
+		fmt.Print(os.Getenv("IGIT_AUTH_USER"))
+		return
+	}
+	if strings.Contains(prompt, "password") {
+		fmt.Print(os.Getenv("IGIT_AUTH_TOKEN"))
+		return
+	}
 }

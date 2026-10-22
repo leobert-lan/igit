@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -481,4 +482,177 @@ func GetUpstreamInfo(dir, gitExe string) (UpstreamInfo, error) {
 		info.HasUpstream = info.Upstream != ""
 	}
 	return info, nil
+}
+
+
+// GitAuthContext 传递给 Git 命令执行器的鉴权与环境上下文
+type GitAuthContext struct {
+	User  string
+	Token string
+}
+
+func injectGitAuth(cmd *exec.Cmd, auth GitAuthContext) {
+	if auth.Token == "" {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	env := os.Environ()
+	env = append(env,
+		"GIT_ASKPASS="+exe,
+		"IGIT_AUTH_USER="+auth.User,
+		"IGIT_AUTH_TOKEN="+auth.Token,
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	cmd.Env = env
+}
+
+// CheckFastForwardStatus 检查本地当前分支与指定远端分支的拓扑相对关系。
+func CheckFastForwardStatus(dir, gitExe, remote, branch string) (ahead, behind int, hasRemoteBranch bool, err error) {
+	exe := ResolveGit(gitExe)
+	if exe == "" {
+		return 0, 0, false, errors.New("未找到 git 可执行文件")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ref := fmt.Sprintf("%s/%s", remote, branch)
+	checkCmd := exec.CommandContext(ctx, exe, "-C", dir, "rev-parse", "--verify", ref)
+	if err := checkCmd.Run(); err != nil {
+		return 0, 0, false, nil
+	}
+
+	rangeArg := fmt.Sprintf("%s...%s", branch, ref)
+	cmd := exec.CommandContext(ctx, exe, "-C", dir, "rev-list", "--left-right", "--count", rangeArg)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, 0, true, fmt.Errorf("检查分支拓扑失败: %v", err)
+	}
+
+	parts := strings.Fields(string(out))
+	if len(parts) >= 2 {
+		ah, _ := strconv.Atoi(parts[0])
+		bh, _ := strconv.Atoi(parts[1])
+		return ah, bh, true, nil
+	}
+	return 0, 0, true, nil
+}
+
+// GitFetchWithAuth 执行抓取，支持可选 Token 鉴权。
+func GitFetchWithAuth(dir, gitExe, remote string, auth GitAuthContext) (string, error) {
+	exe := ResolveGit(gitExe)
+	if exe == "" {
+		return "", errors.New("未找到 git 可执行文件")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmdArgs := []string{"-C", dir, "fetch"}
+	if remote != "" {
+		cmdArgs = append(cmdArgs, remote)
+	}
+	cmd := exec.CommandContext(ctx, exe, cmdArgs...)
+	injectGitAuth(cmd, auth)
+	out, err := cmd.CombinedOutput()
+	msg := strings.TrimSpace(string(out))
+	if err != nil {
+		if msg != "" {
+			return "", fmt.Errorf("fetch 失败: %s", msg)
+		}
+		return "", fmt.Errorf("fetch 失败: %v", err)
+	}
+	return msg, nil
+}
+
+// GitFetchInteractiveWithAuth 在当前终端交互执行 git fetch，支持可选 Token 鉴权。
+func GitFetchInteractiveWithAuth(dir, gitExe, remote string, auth GitAuthContext) error {
+	exe := ResolveGit(gitExe)
+	if exe == "" {
+		return errors.New("未找到 git 可执行文件")
+	}
+	cmdArgs := []string{"-C", dir, "fetch"}
+	if remote != "" {
+		cmdArgs = append(cmdArgs, remote)
+	}
+	cmd := exec.Command(exe, cmdArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	injectGitAuth(cmd, auth)
+	return cmd.Run()
+}
+
+// GitPullFFOnlyWithAuth 执行带有仅快进锁与可选 Token 的 git pull --ff-only。
+func GitPullFFOnlyWithAuth(dir, gitExe, remote, branch string, auth GitAuthContext) error {
+	exe := ResolveGit(gitExe)
+	if exe == "" {
+		return errors.New("未找到 git 可执行文件")
+	}
+	cmdArgs := []string{"-C", dir, "pull", "--ff-only"}
+	if remote != "" {
+		cmdArgs = append(cmdArgs, remote)
+		if branch != "" {
+			cmdArgs = append(cmdArgs, branch)
+		}
+	}
+	cmd := exec.Command(exe, cmdArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	injectGitAuth(cmd, auth)
+	return cmd.Run()
+}
+
+// GitPushWithAuth 执行推送，支持指定 remote 与可选 Token。
+func GitPushWithAuth(dir, gitExe, remote, branch string, extraArgs []string, auth GitAuthContext) error {
+	exe := ResolveGit(gitExe)
+	if exe == "" {
+		return errors.New("未找到 git 可执行文件")
+	}
+	cmdArgs := []string{"-C", dir, "push"}
+	if remote != "" {
+		cmdArgs = append(cmdArgs, remote)
+		if branch != "" {
+			cmdArgs = append(cmdArgs, branch)
+		}
+	}
+	cmdArgs = append(cmdArgs, extraArgs...)
+	cmd := exec.Command(exe, cmdArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	injectGitAuth(cmd, auth)
+	return cmd.Run()
+}
+
+// AddRemote 为仓库新增远端。
+func AddRemote(dir, gitExe, name, rawURL string) error {
+	exe := ResolveGit(gitExe)
+	if exe == "" {
+		return errors.New("未找到 git 可执行文件")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-C", dir, "remote", "add", name, rawURL)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("添加远端失败: %s (%v)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// RemoveRemote 删除仓库的远端配置。
+func RemoveRemote(dir, gitExe, name string) error {
+	exe := ResolveGit(gitExe)
+	if exe == "" {
+		return errors.New("未找到 git 可执行文件")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-C", dir, "remote", "remove", name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("删除远端失败: %s (%v)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }

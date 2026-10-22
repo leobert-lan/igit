@@ -324,33 +324,36 @@ var commandHelps = map[string]string{
   ignore add <模式...>  追加规则到 .gitignore (文件不存在时自动新建，支持 Tab 补全)
   ignore untracked     查看当前工作区未被跟踪的目录与文件`,
 
-	"remote": `igit remote - 远端检查与 HTTPS 用户名记忆管理
+	"remote": `igit remote - 交互式远端管理与平台令牌配置 (AES-256-GCM 加密存储)
 
 用法:
-  remote               列出当前仓库所有远端详细地址与绑定的鉴权用户
-  remote user [用户名] 将用户名固化进远端 URL (Push 时仅需输密码，且按域名跨仓记忆)
-  remote remember <域名> <用户> 手动记录指定域名的默认常用账号
-  remote clear-user    移除远端 URL 中的嵌入用户名`,
+  remote                          拉起交互式远端管理面板 (数字菜单引导，推荐)
+  remote token [远端名] [Token]   配置远端访问令牌 (缺省参数时交互引导，AES 加密保护)
+  remote host-token [域名] [Token]配置平台全局默认 Token (如 github.com，缺省交互引导)
+  remote user [远端名] [用户名]  绑定远端用户名 (缺省参数时交互引导)
+  remote add [远端名] [URL]       添加新远端源 (缺省参数时交互引导)
+  remote rm [远端名]             删除远端配置 (缺省参数时交互列表选择并确认)
+  (注: 推荐直接输入 remote 进入交互面板统一管理)`,
 
-	"fetch": `igit fetch - 远端更新抓取与状态拓扑诊断
-
-用法:
-  fetch [远端名]       拉取最新 refs 并原位刷新 ahead/behind 状态 (单仓或集合批量)`,
-
-	"pull": `igit pull - 仅快进安全同步 (阻止冲突与命令行 Merge)
+	"fetch": `igit fetch - 远端更新抓取与拓扑诊断 (单远端直通，多远端全量抓取)
 
 用法:
-  pull                 仅在工作区干净且无分叉时执行快进同步 (遇分叉提示使用可视化工具处理)`,
+  fetch [远端名]       拉取最新 refs 并刷新 ahead/behind 拓扑状态 (多远端默认全量抓取)`,
+
+	"pull": `igit pull - 仅快进安全同步 (多远端单选，分叉/Merge 提前拦截拒绝)
+
+用法:
+  pull [远端名]        仅在工作区干净且无分叉时执行快进同步 (多远端交互单选，若分叉提前拦截)`,
 
 	"commit": `igit commit - 全量暂存并提交改动 (add -A & commit)
 
 用法:
   commit [提交说明]    将工作区所有改动一次性打包提交 (不传说明时提示输入)`,
 
-	"push": `igit push - 推送到远端跟踪分支 (直接交互输入密码)
+	"push": `igit push - 推送到远端跟踪分支 (多远端 Bubble Tea 光标复选，自动注入 Token)
 
 用法:
-  push                 推送到远端 (未建跟踪分支时给出标准 upstream 命令提示)`,
+  push [远端名]        推送到远端 (多远端可光标复选同时推送多个远端，自动适配已存 Token)`,
 }
 
 var helpTopics = map[string]string{
