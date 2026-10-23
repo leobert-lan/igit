@@ -12,13 +12,14 @@
 package pick
 
 import (
-	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/mattn/go-isatty"
 	"grscan/internal/scope"
 	"grscan/internal/state"
 )
@@ -75,33 +76,67 @@ func Repo(o Opt, kw string) *state.Repo {
 	}
 }
 
-// choose 列编号候选，能交互就等一个编号。
+func isStdinTerminal() bool {
+	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
+}
+
+// choose 列编号候选，能交互就等一个编号。支持 Bubble Tea 交互方向键选择与管道回退。
 func choose(o Opt, out io.Writer, cands []*state.Repo) *state.Repo {
-	shown := list(out, cands)
-	if len(shown) == 0 {
+	sorted := make([]*state.Repo, len(cands))
+	copy(sorted, cands)
+	sort.SliceStable(sorted, func(i, j int) bool { return len(sorted[i].Path) < len(sorted[j].Path) })
+
+	show, more := sorted, 0
+	if len(show) > maxList {
+		show, more = sorted[:maxList], len(sorted)-maxList
+	}
+	if len(show) == 0 {
 		return nil
 	}
 	if o.In == nil {
+		for i, r := range show {
+			fmt.Fprintf(out, "  %2d) %s   %s\n", i+1, r.Path, scope.Summary(r))
+		}
+		if more > 0 {
+			fmt.Fprintf(out, "  … 还有 %d 个，换个更精确的关键字\n", more)
+		}
 		fmt.Fprintf(out, "  重敲一个更精确的关键字（作用域 %s）\n", o.Label)
 		return nil
 	}
-	fmt.Fprint(out, "  输入编号选择，回车取消: ")
-	sc := bufio.NewScanner(o.In)
-	if !sc.Scan() {
-		fmt.Fprintln(out)
-		return nil
+
+	items := make([]MenuItem, len(show))
+	for i, r := range show {
+		items[i] = MenuItem{
+			Key:    strconv.Itoa(i + 1),
+			Label:  r.Name,
+			Detail: fmt.Sprintf("(%s)   %s", r.Path, scope.Summary(r)),
+			Value:  r,
+		}
 	}
-	line := strings.TrimSpace(sc.Text())
-	if line == "" {
+
+	isInteractive := isStdinTerminal() && o.In == os.Stdin
+	var menuIn io.Reader
+	if !isInteractive {
+		menuIn = o.In
+	}
+
+	title := fmt.Sprintf("\n%s：作用域 %s 匹配到多个仓库，请选择目标 (方向键移动，Enter 确认):", o.Cmd, o.Label)
+	chosen, cancelled := Menu(MenuOpt{
+		Title:       title,
+		Prompt:      "  输入编号选择，回车取消: ",
+		Items:       items,
+		In:          menuIn,
+		Out:         out,
+		Interactive: isInteractive,
+	})
+	if cancelled || chosen == nil {
 		fmt.Fprintln(out, "已取消")
 		return nil
 	}
-	n, err := strconv.Atoi(line)
-	if err != nil || n < 1 || n > len(shown) {
-		fmt.Fprintf(out, "  没有这个编号: %s\n", line)
-		return nil
+	if repo, ok := chosen.Value.(*state.Repo); ok {
+		return repo
 	}
-	return shown[n-1]
+	return nil
 }
 
 // list 打印编号候选，返回实际打印出来的那几个（顺序即编号）。

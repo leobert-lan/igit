@@ -220,20 +220,12 @@ func cmdRemote(ctx *appCtx, a args) int {
 
 		// 缺少用户名且处于交互模式：主动交互式询问
 		if userName == "" && interactive {
-			if len(remotes) > 1 {
-				fmt.Println("当前可用远端:")
-				for i, rd := range remotes {
-					fmt.Printf("  %d) %s (%s)\n", i+1, rd.Name, rd.PushURL)
-				}
-				idxStr := readPrompt(ctx, fmt.Sprintf("请选择远端编号 (默认 1 / %s): ", remotes[0].Name))
-				if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
-					remoteName = remotes[idx-1].Name
-				} else {
-					remoteName = remotes[0].Name
-				}
-			} else {
-				remoteName = remotes[0].Name
+			selRemote, cancelled := selectSingleRemote(ctx, remotes, "\n请选择目标远端:")
+			if cancelled {
+				fmt.Println("已取消。")
+				return 0
 			}
+			remoteName = selRemote
 
 			// 检查是否有 Host 记忆账号
 			defaultUser := ""
@@ -294,20 +286,16 @@ func cmdRemote(ctx *appCtx, a args) int {
 
 		if tokenVal == "" && interactive {
 			remotes, _ := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
-			if len(remotes) > 1 {
-				fmt.Println("当前可用远端:")
-				for i, rd := range remotes {
-					fmt.Printf("  %d) %s (%s)\n", i+1, rd.Name, rd.PushURL)
-				}
-				idxStr := readPrompt(ctx, fmt.Sprintf("请选择远端编号 (默认 1 / %s): ", remotes[0].Name))
-				if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
-					remoteName = remotes[idx-1].Name
-				} else {
-					remoteName = remotes[0].Name
-				}
-			} else if len(remotes) == 1 {
-				remoteName = remotes[0].Name
+			if len(remotes) == 0 {
+				fmt.Printf("仓库 %s 尚未配置任何远端，请先添加远端。\n", r.Name)
+				return 1
 			}
+			selRemote, cancelled := selectSingleRemote(ctx, remotes, "\n请选择目标远端:")
+			if cancelled {
+				fmt.Println("已取消。")
+				return 0
+			}
+			remoteName = selRemote
 			tokenVal = readPrompt(ctx, fmt.Sprintf("请输入远端 [%s] 的访问 Token (AES-256-GCM 加密存储): ", remoteName))
 		}
 
@@ -363,16 +351,16 @@ func cmdRemote(ctx *appCtx, a args) int {
 			remoteName = a.pos[1]
 		} else if interactive {
 			remotes, _ := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
-			if len(remotes) > 1 {
-				fmt.Println("选择要清除 Token 的远端:")
-				for i, rd := range remotes {
-					fmt.Printf("  %d) %s\n", i+1, rd.Name)
-				}
-				idxStr := readPrompt(ctx, "请选择编号: ")
-				if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
-					remoteName = remotes[idx-1].Name
-				}
+			if len(remotes) == 0 {
+				fmt.Println("当前仓库没有可清除 Token 的远端。")
+				return 0
 			}
+			selRemote, cancelled := selectSingleRemote(ctx, remotes, "\n选择要清除 Token 的远端:")
+			if cancelled {
+				fmt.Println("已取消。")
+				return 0
+			}
+			remoteName = selRemote
 		}
 		_ = ctx.cfg.SetRepoToken(r.ID, remoteName, "")
 		_ = config.Save(ctx.cfgPath, ctx.cfg)
@@ -407,16 +395,16 @@ func cmdRemote(ctx *appCtx, a args) int {
 			remoteName = a.pos[1]
 		} else if interactive {
 			remotes, _ := gitinfo.GetRemotesDetailed(r.Path, ctx.cfg.GitExe)
-			if len(remotes) > 1 {
-				fmt.Println("选择要清除用户名的远端:")
-				for i, rd := range remotes {
-					fmt.Printf("  %d) %s\n", i+1, rd.Name)
-				}
-				idxStr := readPrompt(ctx, "请选择编号: ")
-				if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
-					remoteName = remotes[idx-1].Name
-				}
+			if len(remotes) == 0 {
+				fmt.Println("当前仓库没有可清除用户名的远端。")
+				return 0
 			}
+			selRemote, cancelled := selectSingleRemote(ctx, remotes, "\n选择要清除用户名的远端:")
+			if cancelled {
+				fmt.Println("已取消。")
+				return 0
+			}
+			remoteName = selRemote
 		}
 		_, newURL, err := gitinfo.SetRemoteUser(r.Path, ctx.cfg.GitExe, remoteName, "")
 		if err != nil {
@@ -462,14 +450,21 @@ func cmdRemote(ctx *appCtx, a args) int {
 				fmt.Println("当前仓库没有可删除的远端。")
 				return 0
 			}
-			fmt.Println("选择要删除的远端:")
+			remoteItems := make([]pick.MenuItem, len(remotes))
 			for i, rd := range remotes {
-				fmt.Printf("  %d) %s (%s)\n", i+1, rd.Name, rd.PushURL)
+				remoteItems[i] = pick.MenuItem{
+					Key:    strconv.Itoa(i + 1),
+					Label:  rd.Name,
+					Detail: "(" + rd.PushURL + ")",
+					Value:  rd.Name,
+				}
 			}
-			idxStr := readPrompt(ctx, "请选择编号: ")
-			if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
-				name = remotes[idx-1].Name
+			chosenRemote, cancelled := selectMenu(ctx, "\n选择要删除的远端:", "请选择编号 (q 取消): ", remoteItems)
+			if cancelled || chosenRemote == nil {
+				fmt.Println("已取消。")
+				return 0
 			}
+			name = chosenRemote.Label
 		}
 		if name == "" {
 			fmt.Println("用法: remote rm <远端名>")
@@ -509,6 +504,35 @@ func cmdRemote(ctx *appCtx, a args) int {
 		printRemoteDetails(ctx, r, remotes)
 		return 0
 	}
+}
+
+// selectSingleRemote 在有多个远端时弹出 selectMenu 供用户选择（支持方向键、j/k、数字键选择与 q 取消）；
+// 只有一个远端时直接返回其名称；无可用远端或取消时返回空与 cancelled = true。
+func selectSingleRemote(ctx *appCtx, remotes []gitinfo.RemoteDetail, title string) (string, bool) {
+	if len(remotes) == 0 {
+		return "", false
+	}
+	if len(remotes) == 1 {
+		return remotes[0].Name, false
+	}
+	items := make([]pick.MenuItem, len(remotes))
+	for i, rd := range remotes {
+		url := rd.PushURL
+		if url == "" {
+			url = rd.FetchURL
+		}
+		items[i] = pick.MenuItem{
+			Key:    strconv.Itoa(i + 1),
+			Label:  rd.Name,
+			Detail: "(" + url + ")",
+			Value:  rd.Name,
+		}
+	}
+	chosen, cancelled := selectMenu(ctx, title, fmt.Sprintf("请选择远端编号 (默认 1 / %s, q 取消): ", remotes[0].Name), items)
+	if cancelled || chosen == nil {
+		return "", true
+	}
+	return chosen.Label, false
 }
 
 func printRemoteDetails(ctx *appCtx, r *state.Repo, remotes []gitinfo.RemoteDetail) {
@@ -555,19 +579,23 @@ func remoteInteractive(ctx *appCtx, r *state.Repo) int {
 		fmt.Printf("║               远端管理控制中心: %-33s ║\n", r.Name)
 		fmt.Println("╚═══════════════════════════════════════════════════════════════════╝")
 		printRemoteDetails(ctx, r, remotes)
-		fmt.Println()
-		fmt.Println("操作选项:")
-		fmt.Println("  [1] 👤 绑定远端用户名 (Username)      - 写入 URL，免输用户名")
-		fmt.Println("  [2] 🔑 配置远端访问令牌 (Token)        - AES-256-GCM 加密，Push/Pull 自动鉴权")
-		fmt.Println("  [3] 🌐 配置平台域名默认账号与 Token  - 如 github.com 全局默认凭据")
-		fmt.Println("  [4] ➕ 添加新远端 (git remote add)     - 添加镜像/备份远端")
-		fmt.Println("  [5] ➖ 删除远端 (git remote remove)  - 移除指定远端")
-		fmt.Println("  [6] 🧹 清除指定远端用户或 Token")
-		fmt.Println("  [0] 返回 / 退出管理中心")
-		fmt.Println()
 
-		choice := readPrompt(ctx, "请选择操作 (1-6 / 0 退出): ")
-		switch choice {
+		items := []pick.MenuItem{
+			{Key: "1", Label: "👤 绑定远端用户名 (Username)", Detail: "- 写入 URL，免输用户名"},
+			{Key: "2", Label: "🔑 配置远端访问令牌 (Token)", Detail: "- AES-256-GCM 加密，Push/Pull 自动鉴权"},
+			{Key: "3", Label: "🌐 配置平台域名默认账号与 Token", Detail: "- 如 github.com 全局默认凭据"},
+			{Key: "4", Label: "➕ 添加新远端 (git remote add)", Detail: "- 添加镜像/备份远端"},
+			{Key: "5", Label: "➖ 删除远端 (git remote remove)", Detail: "- 移除指定远端"},
+			{Key: "6", Label: "🧹 清除指定远端用户或 Token"},
+			{Key: "0", Label: "[返回 / 退出管理中心]"},
+		}
+
+		chosen, cancelled := selectMenu(ctx, "\n操作选项:", "请选择操作 (1-6 / 0 退出): ", items)
+		if cancelled || chosen == nil || chosen.Key == "0" || strings.EqualFold(chosen.Key, "q") {
+			return 0
+		}
+
+		switch chosen.Key {
 		case "1":
 			cmdRemote(ctx, args{pos: []string{"user"}})
 		case "2":
@@ -580,10 +608,8 @@ func remoteInteractive(ctx *appCtx, r *state.Repo) int {
 			cmdRemote(ctx, args{pos: []string{"rm"}})
 		case "6":
 			interactiveClearAuth(ctx, r, remotes)
-		case "0", "q", "quit", "exit", "":
-			return 0
 		default:
-			fmt.Println("无效选项，请输入 1-6 或 0。")
+			return 0
 		}
 	}
 }
@@ -593,24 +619,20 @@ func interactiveClearAuth(ctx *appCtx, r *state.Repo, remotes []gitinfo.RemoteDe
 		fmt.Println("当前仓库无远端配置。")
 		return
 	}
-	fmt.Println("清除认证信息:")
-	fmt.Println("  1) 清除远端 URL 中的用户名")
-	fmt.Println("  2) 清除远端专属加密 Token")
-	fmt.Println("  0) 取消返回")
-	sub := readPrompt(ctx, "请选择 (1-2 / 0 取消): ")
-	if sub != "1" && sub != "2" {
+	items := []pick.MenuItem{
+		{Key: "1", Label: "清除远端 URL 中的用户名"},
+		{Key: "2", Label: "清除远端专属加密 Token"},
+		{Key: "0", Label: "[取消返回]"},
+	}
+	chosen, cancelled := selectMenu(ctx, "\n清除认证信息:", "请选择 (1-2 / 0 取消): ", items)
+	if cancelled || chosen == nil || chosen.Key == "0" || strings.EqualFold(chosen.Key, "q") {
 		return
 	}
-	targetName := remotes[0].Name
-	if len(remotes) > 1 {
-		fmt.Println("选择目标远端:")
-		for i, rd := range remotes {
-			fmt.Printf("  %d) %s\n", i+1, rd.Name)
-		}
-		idxStr := readPrompt(ctx, "请选择编号: ")
-		if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(remotes) {
-			targetName = remotes[idx-1].Name
-		}
+	sub := chosen.Key
+
+	targetName, cCancelled := selectSingleRemote(ctx, remotes, "\n选择目标远端:")
+	if cCancelled {
+		return
 	}
 	if sub == "1" {
 		cmdRemote(ctx, args{pos: []string{"clear-user", targetName}})
@@ -880,6 +902,7 @@ func cmdPull(ctx *appCtx, a args) int {
 	fmt.Println("快进同步完成。")
 	return 0
 }
+
 // ---------------------------------------------------------------- commit
 
 func cmdCommit(ctx *appCtx, a args) int {
@@ -1047,6 +1070,7 @@ func cmdPush(ctx *appCtx, a args) int {
 	refreshRepoState(ctx, r)
 	return 0
 }
+
 // ---------------------------------------------------------------- 补全辅助
 
 func untrackedCandidates(ctx *appCtx) []string {

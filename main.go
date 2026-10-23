@@ -1826,32 +1826,33 @@ func pickGroupForRepo(ctx *appCtx, r *state.Repo) bool {
 	}
 
 	if len(all) == 0 {
-		fmt.Println("当前尚未创建任何分组。")
-		fmt.Println("  +) [新建分组并加入...]")
-		fmt.Println("  q) 取消")
-		fmt.Println()
-		choice := readPrompt(ctx, "请选择 (+ / q 取消): ")
-		if choice == "+" || strings.EqualFold(choice, "new") || strings.EqualFold(choice, "add") {
-			name := readPrompt(ctx, "请输入新分组名称: ")
-			name = strings.TrimSpace(name)
-			if name == "" {
-				fmt.Println("分组名称不能为空，已取消。")
-				return false
-			}
-			r.Group = name
-			r.ReviewedAt = time.Now().Format(time.RFC3339)
-			state.Canonicalize(r)
-			ctx.state.AddGroup(name)
-			if err := ctx.state.Save(); err != nil {
-				fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
-				return false
-			}
-			refreshCurrentScope(ctx)
-			fmt.Printf("已创建分组并设置 %s 为: %s\n", r.Name, r.Group)
-			return true
+		fmt.Printf("\n当前尚未创建任何分组 (仓库: %s)。\n", r.Name)
+		items := []pick.MenuItem{
+			{Key: "+", Label: "[新建分组并加入...]"},
+			{Key: "q", Label: "[取消]"},
 		}
-		fmt.Println("已取消。")
-		return false
+		chosen, cancelled := selectMenu(ctx, "请选择操作:", "请选择 (+ / q 取消): ", items)
+		if cancelled || chosen == nil || chosen.Key == "q" {
+			fmt.Println("已取消。")
+			return false
+		}
+		name := readPrompt(ctx, "请输入新分组名称: ")
+		name = strings.TrimSpace(name)
+		if name == "" {
+			fmt.Println("分组名称不能为空，已取消。")
+			return false
+		}
+		r.Group = name
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		ctx.state.AddGroup(name)
+		if err := ctx.state.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+			return false
+		}
+		refreshCurrentScope(ctx)
+		fmt.Printf("已创建分组并设置 %s 为: %s\n", r.Name, r.Group)
+		return true
 	}
 
 	title := "\n请选择目标分组:"
@@ -2884,40 +2885,129 @@ func pickTagForRepo(ctx *appCtx, r *state.Repo) bool {
 	// 若系统内目前完全没有标签
 	if len(all) == 0 {
 		fmt.Println("\n当前全集尚未创建任何标签。")
-		fmt.Println("  +) [新建标签并打上...]")
-		fmt.Println("  q) 取消")
-		fmt.Println()
-		choice := readPrompt(ctx, "请选择 (+ / q 取消): ")
-		choice = cleanTagInput(choice)
-		if choice == "+" || strings.EqualFold(choice, "new") || strings.EqualFold(choice, "add") {
-			names := readPrompt(ctx, "请输入新标签名称 (多个可用逗号/空格隔开): ")
-			names = cleanTagInput(names)
-			if names == "" {
-				fmt.Println("标签名称为空，已取消。")
-				return false
-			}
-			added := splitList(names)
-			for _, t := range added {
-				t = strings.TrimSpace(t)
-				if t != "" && !hasTag(r, t) {
-					r.Tags = append(r.Tags, t)
-				}
-			}
-			r.ReviewedAt = time.Now().Format(time.RFC3339)
-			state.Canonicalize(r)
-			if err := ctx.state.Save(); err != nil {
-				fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
-				return false
-			}
-			refreshCurrentScope(ctx)
-			fmt.Printf("已为 %s 添加标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
-			return true
+		items := []pick.MenuItem{
+			{Key: "+", Label: "[新建标签并打上...]"},
+			{Key: "q", Label: "[取消]"},
 		}
-		fmt.Println("已取消。")
-		return false
+		chosen, cancelled := selectMenu(ctx, "请选择操作:", "请选择 (+ / q 取消): ", items)
+		if cancelled || chosen == nil || chosen.Key == "q" {
+			fmt.Println("已取消。")
+			return false
+		}
+		names := readPrompt(ctx, "请输入新标签名称 (多个可用逗号/空格隔开): ")
+		names = cleanTagInput(names)
+		if names == "" {
+			fmt.Println("标签名称为空，已取消。")
+			return false
+		}
+		added := splitList(names)
+		for _, t := range added {
+			t = strings.TrimSpace(t)
+			if t != "" && !hasTag(r, t) {
+				r.Tags = append(r.Tags, t)
+			}
+		}
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		if err := ctx.state.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+			return false
+		}
+		refreshCurrentScope(ctx)
+		fmt.Printf("已为 %s 添加标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
+		return true
 	}
 
-	// 系统内已有标签：复选勾选模式
+	// 系统内已有标签：
+	// 1. 终端交互模式：走 Bubble Tea 多选卡片（支持方向键移动、空格勾选、a全选、Enter保存）
+	if isTerminal(os.Stdin) && ctx != nil && ctx.repl && ctx.pipeScanner == nil {
+		curMap := make(map[string]bool)
+		for _, t := range r.Tags {
+			curMap[strings.ToLower(t)] = true
+		}
+
+		items := make([]pick.MenuItem, 0, len(all)+2)
+		for i, t := range all {
+			items = append(items, pick.MenuItem{
+				Key:      strconv.Itoa(i + 1),
+				Label:    t,
+				Selected: curMap[strings.ToLower(t)],
+				Value:    t,
+			})
+		}
+		items = append(items, pick.MenuItem{
+			Key:    "+",
+			Label:  "[新建标签并打上...]",
+			Detail: "(创建新标签并添加给此仓库)",
+			Value:  "+",
+		})
+		if len(r.Tags) > 0 {
+			items = append(items, pick.MenuItem{
+				Key:    "0",
+				Label:  "[清空此仓库所有标签]",
+				Detail: "(清除已打上的全部标签)",
+				Value:  "0",
+			})
+		}
+
+		title := fmt.Sprintf("\n仓库: %s (当前标签: %s)\n请勾选标签 (方向键移动，空格切换，Enter 确认保存，q 取消):", r.Name, tagStr)
+		chosenItems, cancelled := selectMultiMenu(ctx, title, "请勾选标签 (空格切换勾选，a 全选，Enter 确认，q 取消): ", items)
+		if cancelled {
+			fmt.Println("已取消。")
+			return false
+		}
+
+		hasClear := false
+		hasNew := false
+		var newTags []string
+		for _, it := range chosenItems {
+			if it.Key == "0" {
+				hasClear = true
+				break
+			}
+			if it.Key == "+" {
+				hasNew = true
+				continue
+			}
+			if t, ok := it.Value.(string); ok && t != "" {
+				newTags = append(newTags, t)
+			}
+		}
+
+		if hasClear {
+			r.Tags = nil
+			r.ReviewedAt = time.Now().Format(time.RFC3339)
+			state.Canonicalize(r)
+			_ = ctx.state.Save()
+			refreshCurrentScope(ctx)
+			fmt.Printf("已清空 %s 的所有标签。\n", r.Name)
+			return true
+		}
+
+		if hasNew {
+			names := readPrompt(ctx, "请输入新标签名称 (多个可用逗号/空格隔开): ")
+			names = cleanTagInput(names)
+			if names != "" {
+				added := splitList(names)
+				for _, t := range added {
+					t = strings.TrimSpace(t)
+					if t != "" && !hasTag(r, t) {
+						newTags = append(newTags, t)
+					}
+				}
+			}
+		}
+
+		r.Tags = newTags
+		r.ReviewedAt = time.Now().Format(time.RFC3339)
+		state.Canonicalize(r)
+		_ = ctx.state.Save()
+		refreshCurrentScope(ctx)
+		fmt.Printf("已更新 %s 标签: %s\n", r.Name, strings.Join(r.Tags, ", "))
+		return true
+	}
+
+	// 2. 管道测试模式：保留经典编号翻转循环
 	for {
 		curMap := make(map[string]bool)
 		for _, t := range r.Tags {
@@ -3021,6 +3111,352 @@ func pickTagForRepo(ctx *appCtx, r *state.Repo) bool {
 	}
 }
 
+// pickTagActionInDirectoryScope 在目录/全集作用域下交互式管理标签。
+// 支持查看现有标签使用统计、新建标签并关联仓库，以及进入单个标签的批量添加/移出仓库与删除操作。
+func pickTagActionInDirectoryScope(ctx *appCtx) int {
+	scopeName := scopeLabel(ctx.res)
+	inScopeRepos := scopeRepos(ctx)
+
+	allTags := allTagNames(ctx)
+
+	globalCounts := make(map[string]int)
+	inScopeCounts := make(map[string]int)
+	for _, r := range ctx.state.Repos {
+		for _, t := range r.Tags {
+			tl := strings.TrimSpace(t)
+			if tl == "" {
+				continue
+			}
+			globalCounts[tl]++
+			if inPool(inScopeRepos, r) {
+				inScopeCounts[tl]++
+			}
+		}
+	}
+
+	scopeRepoCount := len(ctx.state.Repos)
+	if inScopeRepos != nil {
+		scopeRepoCount = len(inScopeRepos)
+	}
+
+	if len(allTags) == 0 {
+		fmt.Printf("\n当前尚未创建任何标签 (当前作用域: %s · %d 个仓库)。\n", scopeName, scopeRepoCount)
+		items := []pick.MenuItem{
+			{Key: "+", Label: "[新建标签并关联仓库...]", Detail: "(创建新标签并挑选仓库)"},
+			{Key: "q", Label: "[取消]"},
+		}
+		chosen, cancelled := selectMenu(ctx, "请选择操作:", "请选择 (+ / q 取消): ", items)
+		if cancelled || chosen == nil || chosen.Key == "q" {
+			fmt.Println("已取消。")
+			return 0
+		}
+		name := readPrompt(ctx, "请输入新标签名称: ")
+		name = cleanTagInput(name)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			fmt.Println("标签名称不能为空，已取消。")
+			return 0
+		}
+		return manageSingleTagInDirectoryScope(ctx, name)
+	}
+
+	title := fmt.Sprintf("\n标签管理 (当前作用域: %s · %d 个仓库):", scopeName, scopeRepoCount)
+	items := make([]pick.MenuItem, 0, len(allTags)+2)
+	for i, t := range allTags {
+		detail := fmt.Sprintf("(全量: %d 个仓库, 本作用域: %d 个)", globalCounts[t], inScopeCounts[t])
+		items = append(items, pick.MenuItem{
+			Key:    strconv.Itoa(i + 1),
+			Label:  t,
+			Detail: detail,
+			Value:  t,
+		})
+	}
+	items = append(items, pick.MenuItem{
+		Key:   "+",
+		Label: "[新建标签并关联仓库...]",
+	})
+	items = append(items, pick.MenuItem{
+		Key:   "q",
+		Label: "[取消]",
+	})
+
+	chosen, cancelled := selectMenu(ctx, title, "请选择要管理的标签 (编号 / + / q 取消): ", items)
+	if cancelled || chosen == nil || chosen.Key == "q" {
+		fmt.Println("已取消。")
+		return 0
+	}
+
+	if chosen.Key == "+" {
+		name := readPrompt(ctx, "请输入新标签名称: ")
+		name = cleanTagInput(name)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			fmt.Println("标签名称不能为空，已取消。")
+			return 0
+		}
+		return manageSingleTagInDirectoryScope(ctx, name)
+	}
+
+	targetTag, ok := chosen.Value.(string)
+	if !ok || targetTag == "" {
+		targetTag = chosen.Label
+	}
+	return manageSingleTagInDirectoryScope(ctx, targetTag)
+}
+
+// manageSingleTagInDirectoryScope 对指定标签进行增加仓库、移除仓库或全局删除标签操作。
+func manageSingleTagInDirectoryScope(ctx *appCtx, tagName string) int {
+	inScopeRepos := scopeRepos(ctx)
+
+	var tagRepos []*state.Repo
+	for _, r := range ctx.state.Repos {
+		if hasTag(r, tagName) {
+			tagRepos = append(tagRepos, r)
+		}
+	}
+	inScopeCount := 0
+	for _, r := range tagRepos {
+		if inPool(inScopeRepos, r) {
+			inScopeCount++
+		}
+	}
+
+	// 候选仓库：如果当前处于 NodeTag 上下文，候选集为全量仓库中尚未拥有该标签的仓库；
+	// 否则限定在当前作用域（若在根目录或全集，则为全量仓库）。
+	var candPool []*state.Repo
+	if ctx.res != nil && ctx.res.NodeType == scope.NodeTag {
+		candPool = ctx.state.Repos
+	} else {
+		candPool = inScopeRepos
+		if candPool == nil {
+			candPool = ctx.state.Repos
+		}
+	}
+
+	var candRepos []*state.Repo
+	for _, r := range candPool {
+		if !hasTag(r, tagName) {
+			candRepos = append(candRepos, r)
+		}
+	}
+
+	// 若该标签目前尚未挂载到任何仓库（例如刚刚输入的新标签名称），直接进入添加仓库流程
+	if len(tagRepos) == 0 {
+		return addReposToTagInScope(ctx, tagName, candRepos)
+	}
+
+	title := fmt.Sprintf("\n标签: %s (全量: %d 个仓库, 本作用域内: %d 个)", tagName, len(tagRepos), inScopeCount)
+	items := []pick.MenuItem{
+		{
+			Key:    "1",
+			Label:  "添加仓库到此标签",
+			Detail: fmt.Sprintf("(限定当前目录范围, 可选: %d 个)", len(candRepos)),
+		},
+		{
+			Key:    "2",
+			Label:  "从此标签移出仓库",
+			Detail: fmt.Sprintf("(全量: %d 个仓库)", len(tagRepos)),
+		},
+		{
+			Key:    "3",
+			Label:  "删除该标签",
+			Detail: fmt.Sprintf("(从全部 %d 个仓库中全局移除)", len(tagRepos)),
+		},
+		{
+			Key:   "q",
+			Label: "[返回 / 取消]",
+		},
+	}
+
+	chosen, cancelled := selectMenu(ctx, title, "请选择操作 (编号 / q 取消): ", items)
+	if cancelled || chosen == nil || chosen.Key == "q" {
+		fmt.Println("已返回。")
+		return 0
+	}
+
+	switch chosen.Key {
+	case "1":
+		return addReposToTagInScope(ctx, tagName, candRepos)
+	case "2":
+		return removeReposFromTagInScope(ctx, tagName, tagRepos, inScopeRepos)
+	case "3":
+		return deleteTagGlobally(ctx, tagName, tagRepos)
+	default:
+		return 0
+	}
+}
+
+// addReposToTagInScope 将当前作用域内的候选仓库批量加入指定标签（支持多选）。
+func addReposToTagInScope(ctx *appCtx, tagName string, candRepos []*state.Repo) int {
+	if len(candRepos) == 0 {
+		fmt.Printf("当前目录范围内没有可加入标签 [%s] 的仓库（全部已拥有该标签或本目录无仓库）。\n", tagName)
+		return 0
+	}
+
+	title := fmt.Sprintf("\n请选择要加入标签 [%s] 的仓库 (限定在当前目录范围内, 共 %d 个候选, 支持多选):", tagName, len(candRepos))
+	items := make([]pick.MenuItem, 0, len(candRepos))
+	for i, r := range candRepos {
+		detail := ""
+		if len(r.Tags) > 0 {
+			detail = fmt.Sprintf("[现有标签: %s]", strings.Join(r.Tags, ", "))
+		}
+		items = append(items, pick.MenuItem{
+			Key:    strconv.Itoa(i + 1),
+			Label:  r.Name,
+			Detail: detail,
+			Value:  r,
+		})
+	}
+
+	chosenItems, cancelled := selectMultiMenu(ctx, title, "请选择仓库编号 (空格或逗号分隔多选，输入 a 全选，q 取消): ", items)
+	if cancelled || len(chosenItems) == 0 {
+		fmt.Println("已取消。")
+		return 0
+	}
+
+	var targets []*state.Repo
+	for _, it := range chosenItems {
+		if r, ok := it.Value.(*state.Repo); ok && r != nil {
+			targets = append(targets, r)
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Println("未选择任何有效仓库。")
+		return 0
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	for _, r := range targets {
+		if !hasTag(r, tagName) {
+			r.Tags = append(r.Tags, tagName)
+		}
+		r.ReviewedAt = now
+		state.Canonicalize(r)
+	}
+	if err := ctx.state.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+		return 1
+	}
+	refreshCurrentScope(ctx)
+	if len(targets) == 1 {
+		fmt.Printf("已为 %s 添加标签: %s\n", targets[0].Name, tagName)
+	} else {
+		fmt.Printf("已将 %d 个仓库批量加入标签 [%s]:\n", len(targets), tagName)
+		for _, r := range targets {
+			fmt.Printf("  • %s\n", r.Name)
+		}
+	}
+	return 0
+}
+
+// removeReposFromTagInScope 从指定标签中批量移出仓库（支持多选）。
+func removeReposFromTagInScope(ctx *appCtx, tagName string, tagRepos []*state.Repo, inScopeRepos []*state.Repo) int {
+	if len(tagRepos) == 0 {
+		fmt.Printf("标签 [%s] 下当前没有关联仓库。\n", tagName)
+		return 0
+	}
+
+	sortedRepos := make([]*state.Repo, len(tagRepos))
+	copy(sortedRepos, tagRepos)
+	sort.SliceStable(sortedRepos, func(i, j int) bool {
+		inI := inPool(inScopeRepos, sortedRepos[i])
+		inJ := inPool(inScopeRepos, sortedRepos[j])
+		if inI != inJ {
+			return inI
+		}
+		return sortedRepos[i].Name < sortedRepos[j].Name
+	})
+
+	title := fmt.Sprintf("\n拥有标签 [%s] 的仓库 (共 %d 个, 支持多选):", tagName, len(sortedRepos))
+	items := make([]pick.MenuItem, 0, len(sortedRepos))
+	for i, r := range sortedRepos {
+		isIn := inPool(inScopeRepos, r)
+		badge := "[当前目录]"
+		detail := ""
+		if !isIn {
+			badge = "[超出范围]"
+			detail = fmt.Sprintf("(%s)", r.Path)
+		}
+		items = append(items, pick.MenuItem{
+			Key:    strconv.Itoa(i + 1),
+			Label:  r.Name,
+			Badge:  badge,
+			Detail: detail,
+			Value:  r,
+		})
+	}
+
+	chosenItems, cancelled := selectMultiMenu(ctx, title, "请选择要移出的仓库编号 (空格或逗号分隔多选，输入 a 全选，q 取消): ", items)
+	if cancelled || len(chosenItems) == 0 {
+		fmt.Println("已取消。")
+		return 0
+	}
+
+	var targets []*state.Repo
+	for _, it := range chosenItems {
+		if r, ok := it.Value.(*state.Repo); ok && r != nil {
+			targets = append(targets, r)
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Println("未选择任何有效仓库。")
+		return 0
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	for _, r := range targets {
+		r.Tags = removeTag(r, tagName)
+		r.ReviewedAt = now
+		state.Canonicalize(r)
+	}
+	if err := ctx.state.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+		return 1
+	}
+	refreshCurrentScope(ctx)
+	if len(targets) == 1 {
+		fmt.Printf("已将 %s 从标签 [%s] 移出。\n", targets[0].Name, tagName)
+	} else {
+		fmt.Printf("已将 %d 个仓库批量从标签 [%s] 移出:\n", len(targets), tagName)
+		for _, r := range targets {
+			fmt.Printf("  • %s\n", r.Name)
+		}
+	}
+	return 0
+}
+
+// deleteTagGlobally 全局彻底删除指定标签，从所有拥有该标签的仓库中剥离。
+func deleteTagGlobally(ctx *appCtx, tagName string, tagRepos []*state.Repo) int {
+	if len(tagRepos) == 0 {
+		fmt.Printf("标签 [%s] 未关联任何仓库，无需删除。\n", tagName)
+		return 0
+	}
+
+	confirmMsg := fmt.Sprintf("确认要彻底删除标签 [%s] 吗？\n此操作将从全部 %d 个仓库中全局移除该标签 [y/N]: ", tagName, len(tagRepos))
+	if !confirmPrompt(ctx, confirmMsg) {
+		fmt.Println("已取消删除。")
+		return 0
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	count := 0
+	for _, r := range ctx.state.Repos {
+		if hasTag(r, tagName) {
+			r.Tags = removeTag(r, tagName)
+			r.ReviewedAt = now
+			state.Canonicalize(r)
+			count++
+		}
+	}
+	if err := ctx.state.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "保存失败: %v\n", err)
+		return 1
+	}
+	refreshCurrentScope(ctx)
+	fmt.Printf("已成功删除标签 [%s]（已从 %d 个仓库中全部移除）。\n", tagName, count)
+	return 0
+}
+
 func pickRepoToRemoveFromTag(ctx *appCtx, tagName string) bool {
 	var repos []*state.Repo
 	for _, r := range ctx.state.Repos {
@@ -3032,87 +3468,12 @@ func pickRepoToRemoveFromTag(ctx *appCtx, tagName string) bool {
 		fmt.Printf("标签 %s 下当前没有关联仓库。\n", tagName)
 		return false
 	}
-	fmt.Printf("\n拥有标签 [%s] 的仓库 (共 %d 个):\n", tagName, len(repos))
-	for i, r := range repos {
-		fmt.Printf("  %2d) %s\n", i+1, r.Name)
-	}
-	fmt.Println()
-	choice := readPrompt(ctx, "请选择要移除此标签的仓库 (编号 / q 取消): ")
-	choice = cleanTagInput(choice)
-	if choice == "" || strings.EqualFold(choice, "q") || strings.EqualFold(choice, "quit") {
-		fmt.Println("已取消。")
-		return false
-	}
-	var target *state.Repo
-	idx, err := strconv.Atoi(choice)
-	if err == nil && idx >= 1 && idx <= len(repos) {
-		target = repos[idx-1]
-	} else {
-		for _, r := range repos {
-			if strings.EqualFold(r.Name, choice) || strings.EqualFold(r.ID, choice) {
-				target = r
-				break
-			}
-		}
-	}
-	if target == nil {
-		fmt.Printf("无效的选项: %s\n", choice)
-		return false
-	}
-	target.Tags = removeTag(target, tagName)
-	target.ReviewedAt = time.Now().Format(time.RFC3339)
-	state.Canonicalize(target)
-	_ = ctx.state.Save()
-	refreshCurrentScope(ctx)
-	fmt.Printf("已将 %s 的标签 [%s] 移除。\n", target.Name, tagName)
-	return true
+	inScopeRepos := scopeRepos(ctx)
+	return removeReposFromTagInScope(ctx, tagName, repos, inScopeRepos) == 0
 }
 
 func pickTagActionInTagScope(ctx *appCtx, tagName string) int {
-	var count int
-	for _, r := range ctx.state.Repos {
-		if hasTag(r, tagName) {
-			count++
-		}
-	}
-	fmt.Printf("\n当前标签: %s (共 %d 个仓库)\n", tagName, count)
-	fmt.Println("  1) 移除关联仓库 (rm / clear)")
-	fmt.Println("  2) 添加关联仓库 (add)")
-	fmt.Println("  3) 查看所有标签 (list)")
-	fmt.Println()
-	choice := readPrompt(ctx, "请选择操作 (编号 / q 取消): ")
-	choice = cleanTagInput(choice)
-	switch choice {
-	case "1", "rm", "clear":
-		pickRepoToRemoveFromTag(ctx, tagName)
-		return 0
-	case "2", "add":
-		kw := readPrompt(ctx, "请输入要添加此标签的仓库名称/关键字: ")
-		kw = cleanTagInput(kw)
-		if kw == "" {
-			fmt.Println("已取消。")
-			return 0
-		}
-		r := pickTargetGlobal(ctx, "tag add", kw)
-		if r == nil {
-			return 2
-		}
-		if hasTag(r, tagName) {
-			fmt.Printf("仓库 %s 已拥有标签 [%s]。\n", r.Name, tagName)
-			return 0
-		}
-		r.Tags = append(r.Tags, tagName)
-		r.ReviewedAt = time.Now().Format(time.RFC3339)
-		state.Canonicalize(r)
-		_ = ctx.state.Save()
-		refreshCurrentScope(ctx)
-		fmt.Printf("已为 %s 添加标签: %s\n", r.Name, tagName)
-		return 0
-	case "3", "list", "ls":
-		return printAllTagsWithHints(ctx)
-	default:
-		return 0
-	}
+	return manageSingleTagInDirectoryScope(ctx, tagName)
 }
 
 func cmdTag(ctx *appCtx, a args) int {
@@ -3133,6 +3494,8 @@ func cmdTag(ctx *appCtx, a args) int {
 				tagName := ctx.res.Scope.Segs[len(ctx.res.Scope.Segs)-1].Ident
 				return pickTagActionInTagScope(ctx, tagName)
 			}
+			// Priority 3: 目录/全集作用域上下文
+			return pickTagActionInDirectoryScope(ctx)
 		}
 		return printAllTagsWithHints(ctx)
 
@@ -4416,116 +4779,113 @@ func cmdConfig(ctx *appCtx, a args) int {
 }
 
 func configInteractive(ctx *appCtx) int {
-	sc := bufio.NewScanner(os.Stdin)
-	readLine := func(prompt string) string {
-		fmt.Print(prompt)
-		if !sc.Scan() {
-			return ""
-		}
-		return strings.TrimSpace(sc.Text())
-	}
-
 	for {
 		fmt.Println()
 		fmt.Println("╔═══════════════════════════════════════════════════════════════════╗")
 		fmt.Println("║                      igit 配置管理中心 (Interactive)              ║")
 		fmt.Println("╚═══════════════════════════════════════════════════════════════════╝")
-		fmt.Printf("配置文件: %s\n\n", ctx.cfgPath)
+		fmt.Printf("配置文件: %s\n", ctx.cfgPath)
 
-		rootDesc := fmt.Sprintf("%d 个根目录", len(ctx.cfg.Roots))
-		exportDesc := fmt.Sprintf("自动打开: %v", ctx.cfg.ShouldAutoOpenExport())
-		perfDesc := fmt.Sprintf("并发 %d, 深度 %d, fast=%v", ctx.cfg.Jobs, ctx.cfg.MaxDepth, ctx.cfg.Fast)
-		excludeDesc := fmt.Sprintf("%d 个跳过项", len(ctx.cfg.ExcludeNames))
+		rootDesc := fmt.Sprintf("(%d 个根目录)", len(ctx.cfg.Roots))
+		exportDesc := fmt.Sprintf("(自动打开: %v)", ctx.cfg.ShouldAutoOpenExport())
+		perfDesc := fmt.Sprintf("(并发 %d, 深度 %d, fast=%v)", ctx.cfg.Jobs, ctx.cfg.MaxDepth, ctx.cfg.Fast)
+		excludeDesc := fmt.Sprintf("(%d 个跳过项)", len(ctx.cfg.ExcludeNames))
 
-		fmt.Printf("  [1] 📂 扫描根目录管理     (%s)\n", rootDesc)
-		fmt.Printf("  [2] 📦 报告导出设置       (%s)\n", exportDesc)
-		fmt.Printf("  [3] ⚡ 性能与扫描深度     (%s)\n", perfDesc)
-		fmt.Printf("  [4] 🚫 排除目录过滤管理   (%s)\n", excludeDesc)
-		fmt.Printf("  [5] 🔍 智能探测推荐目录   (粗扫磁盘发现高频代码目录并交互勾选)\n")
-		fmt.Printf("  [6] 📝 在外部编辑器中打开 (直接编辑 config.json 纯文本)\n")
-		fmt.Println("  [0] 保存并退出配置中心")
-		fmt.Println()
+		items := []pick.MenuItem{
+			{Key: "1", Label: "📂 扫描根目录管理", Detail: rootDesc},
+			{Key: "2", Label: "📦 报告导出设置", Detail: exportDesc},
+			{Key: "3", Label: "⚡ 性能与扫描深度", Detail: perfDesc},
+			{Key: "4", Label: "🚫 排除目录过滤管理", Detail: excludeDesc},
+			{Key: "5", Label: "🔍 智能探测推荐目录", Detail: "(粗扫磁盘发现高频代码目录并交互勾选)"},
+			{Key: "6", Label: "📝 在外部编辑器中打开", Detail: "(直接编辑 config.json 纯文本)"},
+			{Key: "0", Label: "[保存并退出配置中心]"},
+		}
 
-		choice := readLine("请输入选项编号 [0-6] (回车退出): ")
-		if choice == "" || choice == "0" || choice == "q" || choice == "exit" {
+		chosen, cancelled := selectMenu(ctx, "\n请选择配置项目:", "请输入选项编号 [0-6] (0/q 退出): ", items)
+		if cancelled || chosen == nil || chosen.Key == "0" || strings.EqualFold(chosen.Key, "q") {
 			fmt.Println("已退出配置中心。")
 			return 0
 		}
 
-		switch choice {
+		switch chosen.Key {
 		case "1":
-			configInteractiveRoots(ctx, readLine)
+			configInteractiveRoots(ctx)
 		case "2":
-			configInteractiveExport(ctx, readLine)
+			configInteractiveExport(ctx)
 		case "3":
-			configInteractivePerf(ctx, readLine)
+			configInteractivePerf(ctx)
 		case "4":
-			configInteractiveExcludes(ctx, readLine)
+			configInteractiveExcludes(ctx)
 		case "5":
-			configInteractiveDiscover(ctx, readLine)
+			configInteractiveDiscover(ctx)
 		case "6":
 			configOpenInEditor(ctx)
 		default:
-			fmt.Println("无效选项，请输入 0 到 6 之间的数字。")
+			return 0
 		}
 	}
 }
 
-func configInteractiveRoots(ctx *appCtx, readLine func(string) string) {
+func configInteractiveRoots(ctx *appCtx) {
 	for {
-		fmt.Println("\n--- 📂 扫描根目录管理 ---")
-		if len(ctx.cfg.Roots) == 0 {
-			fmt.Println("  (当前未配置任何扫描根目录)")
-		} else {
-			for i, r := range ctx.cfg.Roots {
-				fmt.Printf("  [%d] %s\n", i+1, r)
-			}
+		items := []pick.MenuItem{
+			{Key: "+", Label: "[+] 添加扫描根目录...", Detail: "(输入绝对或相对路径)"},
 		}
-		fmt.Println()
-		fmt.Println("  [+] 输入目录路径直接添加 (例如 D:\\code)")
-		fmt.Println("  [-] 输入编号直接移除 (例如 2 或 -2)")
-		fmt.Println("  [0] 返回上级菜单")
-		in := readLine("请输入: ")
-		if in == "" || in == "0" || in == "q" {
+		for i, r := range ctx.cfg.Roots {
+			items = append(items, pick.MenuItem{
+				Key:    strconv.Itoa(i + 1),
+				Label:  r,
+				Detail: "[按此项或输入编号可移除]",
+				Value:  r,
+			})
+		}
+		items = append(items, pick.MenuItem{Key: "0", Label: "[0] 返回上级菜单"})
+
+		title := fmt.Sprintf("\n--- 📂 扫描根目录管理 (当前 %d 个) ---", len(ctx.cfg.Roots))
+		chosen, cancelled := selectMenu(ctx, title, "请选择操作 (方向键移动，Enter 确认): ", items)
+		if cancelled || chosen == nil || chosen.Key == "0" || strings.EqualFold(chosen.Key, "q") {
 			return
 		}
-		trim := strings.TrimPrefix(in, "-")
-		if idx, err := strconv.Atoi(trim); err == nil && idx >= 1 && idx <= len(ctx.cfg.Roots) {
-			target := ctx.cfg.Roots[idx-1]
+
+		if chosen.Key == "+" {
+			path := readPrompt(ctx, "请输入要添加的扫描根目录路径 (回车取消): ")
+			path = strings.TrimSpace(strings.Trim(path, "\""))
+			if path != "" {
+				changed, abs := config.AddRoot(ctx.cfg, path)
+				if changed {
+					_ = config.Save(ctx.cfgPath, ctx.cfg)
+					fmt.Printf("✓ 已添加扫描根: %s\n", abs)
+				} else {
+					fmt.Printf("没有变化（可能已存在或路径无效）: %s\n", abs)
+				}
+			}
+			continue
+		}
+
+		target, ok := chosen.Value.(string)
+		if !ok || target == "" {
+			target = chosen.Label
+		}
+		if confirmPrompt(ctx, fmt.Sprintf("确认移除扫描根目录 [%s] 吗? [y/N]: ", target)) {
 			config.RemoveRoot(ctx.cfg, target)
 			_ = config.Save(ctx.cfgPath, ctx.cfg)
 			fmt.Printf("✓ 已移除扫描根: %s\n", target)
-			continue
-		}
-		path := strings.TrimPrefix(in, "+")
-		path = strings.TrimSpace(path)
-		path = strings.Trim(path, "\"")
-		if path != "" {
-			changed, abs := config.AddRoot(ctx.cfg, path)
-			if changed {
-				_ = config.Save(ctx.cfgPath, ctx.cfg)
-				fmt.Printf("✓ 已添加扫描根: %s\n", abs)
-			} else {
-				fmt.Printf("没有变化（可能已存在或路径无效）: %s\n", abs)
-			}
 		}
 	}
 }
 
-func configInteractiveExport(ctx *appCtx, readLine func(string) string) {
+func configInteractiveExport(ctx *appCtx) {
 	for {
-		fmt.Println("\n--- 📦 报告导出设置 ---")
-		fmt.Printf("  当前导出目录:   %s\n", ctx.cfg.ResolvedExportDir(ctx.home))
-		fmt.Printf("  导出后自动打开: %v\n", ctx.cfg.ShouldAutoOpenExport())
-		fmt.Println()
-		fmt.Println("  [1] 切换导出后是否自动打开 (当前: " + fmt.Sprintf("%v", ctx.cfg.ShouldAutoOpenExport()) + ")")
-		fmt.Println("  [2] 修改导出目标存储目录")
-		fmt.Println("  [0] 返回上级菜单")
-		in := readLine("请输入选项 [0-2]: ")
-		if in == "" || in == "0" || in == "q" {
+		items := []pick.MenuItem{
+			{Key: "1", Label: "切换导出后是否自动打开", Detail: fmt.Sprintf("(当前: %v)", ctx.cfg.ShouldAutoOpenExport())},
+			{Key: "2", Label: "修改导出目标存储目录", Detail: fmt.Sprintf("(当前: %s)", ctx.cfg.ResolvedExportDir(ctx.home))},
+			{Key: "0", Label: "[返回上级菜单]"},
+		}
+		chosen, cancelled := selectMenu(ctx, "\n--- 📦 报告导出设置 ---", "请输入选项 [0-2]: ", items)
+		if cancelled || chosen == nil || chosen.Key == "0" || strings.EqualFold(chosen.Key, "q") {
 			return
 		}
-		switch in {
+		switch chosen.Key {
 		case "1":
 			curr := ctx.cfg.ShouldAutoOpenExport()
 			next := !curr
@@ -4533,7 +4893,7 @@ func configInteractiveExport(ctx *appCtx, readLine func(string) string) {
 			_ = config.Save(ctx.cfgPath, ctx.cfg)
 			fmt.Printf("✓ 导出自动打开已更新为: %v\n", next)
 		case "2":
-			p := readLine("请输入新的导出根目录绝对路径 (回车取消): ")
+			p := readPrompt(ctx, "请输入新的导出根目录绝对路径 (回车取消): ")
 			p = strings.TrimSpace(strings.Trim(p, "\""))
 			if p != "" {
 				ctx.cfg.ExportDir = p
@@ -4544,34 +4904,30 @@ func configInteractiveExport(ctx *appCtx, readLine func(string) string) {
 	}
 }
 
-func configInteractivePerf(ctx *appCtx, readLine func(string) string) {
+func configInteractivePerf(ctx *appCtx) {
 	for {
-		fmt.Println("\n--- ⚡ 性能与扫描深度 ---")
-		fmt.Printf("  并发工作数 (Jobs):  %d\n", ctx.cfg.Jobs)
-		fmt.Printf("  最大扫描深度 (Depth): %d\n", ctx.cfg.MaxDepth)
-		fmt.Printf("  快速扫描模式 (Fast):  %v\n", ctx.cfg.Fast)
-		fmt.Printf("  深度检测模式 (Deep):  %v\n", ctx.cfg.Deep)
-		fmt.Println()
-		fmt.Println("  [1] 修改并发工作数 (建议 4~16)")
-		fmt.Println("  [2] 修改最大扫描深度 (建议 5~15)")
-		fmt.Println("  [3] 切换快速模式 Fast (仅扫元数据，不读 git 状态)")
-		fmt.Println("  [4] 切换深度模式 Deep (检测大文件与历史体积)")
-		fmt.Println("  [0] 返回上级菜单")
-		in := readLine("请输入选项 [0-4]: ")
-		if in == "" || in == "0" || in == "q" {
+		items := []pick.MenuItem{
+			{Key: "1", Label: "修改并发工作数 (Jobs)", Detail: fmt.Sprintf("(当前: %d，建议 4~16)", ctx.cfg.Jobs)},
+			{Key: "2", Label: "修改最大扫描深度 (MaxDepth)", Detail: fmt.Sprintf("(当前: %d，建议 5~15)", ctx.cfg.MaxDepth)},
+			{Key: "3", Label: "切换快速模式 (Fast)", Detail: fmt.Sprintf("(当前: %v，仅扫元数据，不读 git 状态)", ctx.cfg.Fast)},
+			{Key: "4", Label: "切换深度模式 (Deep)", Detail: fmt.Sprintf("(当前: %v，检测大文件与历史体积)", ctx.cfg.Deep)},
+			{Key: "0", Label: "[返回上级菜单]"},
+		}
+		chosen, cancelled := selectMenu(ctx, "\n--- ⚡ 性能与扫描深度 ---", "请输入选项 [0-4]: ", items)
+		if cancelled || chosen == nil || chosen.Key == "0" || strings.EqualFold(chosen.Key, "q") {
 			return
 		}
-		switch in {
+		switch chosen.Key {
 		case "1":
-			v := readLine(fmt.Sprintf("输入新的并发数 (当前 %d): ", ctx.cfg.Jobs))
-			if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 64 {
+			v := readPrompt(ctx, fmt.Sprintf("输入新的并发数 (当前 %d): ", ctx.cfg.Jobs))
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 1 && n <= 64 {
 				ctx.cfg.Jobs = n
 				_ = config.Save(ctx.cfgPath, ctx.cfg)
 				fmt.Printf("✓ 并发数已更新为: %d\n", n)
 			}
 		case "2":
-			v := readLine(fmt.Sprintf("输入新的最大深度 (当前 %d): ", ctx.cfg.MaxDepth))
-			if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 30 {
+			v := readPrompt(ctx, fmt.Sprintf("输入新的最大深度 (当前 %d): ", ctx.cfg.MaxDepth))
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 1 && n <= 30 {
 				ctx.cfg.MaxDepth = n
 				_ = config.Save(ctx.cfgPath, ctx.cfg)
 				fmt.Printf("✓ 最大深度已更新为: %d\n", n)
@@ -4588,39 +4944,54 @@ func configInteractivePerf(ctx *appCtx, readLine func(string) string) {
 	}
 }
 
-func configInteractiveExcludes(ctx *appCtx, readLine func(string) string) {
+func configInteractiveExcludes(ctx *appCtx) {
 	for {
-		fmt.Println("\n--- 🚫 排除目录过滤管理 ---")
-		fmt.Println("当前跳过的目录名:")
-		for i, n := range ctx.cfg.ExcludeNames {
-			fmt.Printf("  [%2d] %s\n", i+1, n)
+		items := []pick.MenuItem{
+			{Key: "+", Label: "[+] 添加排除目录名...", Detail: "(例如 target)"},
 		}
-		fmt.Println()
-		fmt.Println("  [+] 输入名称添加排除项 (例如 target)")
-		fmt.Println("  [-] 输入编号移除排除项 (例如 3 或 -3)")
-		fmt.Println("  [0] 返回上级菜单")
-		in := readLine("请输入: ")
-		if in == "" || in == "0" || in == "q" {
+		for i, n := range ctx.cfg.ExcludeNames {
+			items = append(items, pick.MenuItem{
+				Key:    strconv.Itoa(i + 1),
+				Label:  n,
+				Detail: "[按此项可移除]",
+				Value:  n,
+			})
+		}
+		items = append(items, pick.MenuItem{Key: "0", Label: "[0] 返回上级菜单"})
+
+		title := fmt.Sprintf("\n--- 🚫 排除目录过滤管理 (当前 %d 个) ---", len(ctx.cfg.ExcludeNames))
+		chosen, cancelled := selectMenu(ctx, title, "请选择操作 (编号 / 0 返回): ", items)
+		if cancelled || chosen == nil || chosen.Key == "0" || strings.EqualFold(chosen.Key, "q") {
 			return
 		}
-		trim := strings.TrimPrefix(in, "-")
-		if idx, err := strconv.Atoi(trim); err == nil && idx >= 1 && idx <= len(ctx.cfg.ExcludeNames) {
-			removed := ctx.cfg.ExcludeNames[idx-1]
-			ctx.cfg.ExcludeNames = append(ctx.cfg.ExcludeNames[:idx-1], ctx.cfg.ExcludeNames[idx:]...)
-			_ = config.Save(ctx.cfgPath, ctx.cfg)
-			fmt.Printf("✓ 已移除排除项: %s\n", removed)
+
+		if chosen.Key == "+" {
+			name := readPrompt(ctx, "请输入要排除的目录名: ")
+			name = strings.TrimSpace(strings.Trim(name, "\""))
+			if name != "" {
+				ctx.cfg.ExcludeNames = append(ctx.cfg.ExcludeNames, name)
+				_ = config.Save(ctx.cfgPath, ctx.cfg)
+				fmt.Printf("✓ 已添加排除项: %s\n", name)
+			}
 			continue
 		}
-		name := strings.TrimSpace(strings.TrimPrefix(in, "+"))
-		if name != "" {
-			ctx.cfg.ExcludeNames = append(ctx.cfg.ExcludeNames, name)
-			_ = config.Save(ctx.cfgPath, ctx.cfg)
-			fmt.Printf("✓ 已添加排除项: %s\n", name)
+
+		removed, ok := chosen.Value.(string)
+		if !ok || removed == "" {
+			removed = chosen.Label
+		}
+		for idx, n := range ctx.cfg.ExcludeNames {
+			if n == removed {
+				ctx.cfg.ExcludeNames = append(ctx.cfg.ExcludeNames[:idx], ctx.cfg.ExcludeNames[idx+1:]...)
+				_ = config.Save(ctx.cfgPath, ctx.cfg)
+				fmt.Printf("✓ 已移除排除项: %s\n", removed)
+				break
+			}
 		}
 	}
 }
 
-func configInteractiveDiscover(ctx *appCtx, readLine func(string) string) {
+func configInteractiveDiscover(ctx *appCtx) {
 	fmt.Println("\n正在粗扫各盘顶层，探测包含 Git 仓库的高频目录...")
 	driveRoots := fixedDrives()
 	driveRoots = normalizeRoots(driveRoots)
@@ -4666,29 +5037,26 @@ func configInteractiveDiscover(ctx *appCtx, readLine func(string) string) {
 	if len(rows) < limit {
 		limit = len(rows)
 	}
-	fmt.Printf("\n探测到 %d 个仓库，以下是仓库最集中的目录:\n\n", len(res.Repos))
+	items := make([]pick.MenuItem, limit)
 	for i := 0; i < limit; i++ {
-		fmt.Printf("  [%2d] 包含 %3d 个仓库: %s\n", i+1, rows[i].n, rows[i].root)
+		items[i] = pick.MenuItem{
+			Key:    strconv.Itoa(i + 1),
+			Label:  rows[i].root,
+			Detail: fmt.Sprintf("(包含 %3d 个仓库)", rows[i].n),
+			Value:  rows[i].root,
+		}
 	}
-	fmt.Println()
-	in := readLine("输入要添加为扫描根的编号 (如 1 或 1,2 或 a 全选，回车跳过): ")
-	if in == "" || in == "0" {
+	title := fmt.Sprintf("\n探测到 %d 个仓库，以下是仓库最集中的目录 (支持多选勾选):", len(res.Repos))
+	chosenItems, cancelled := selectMultiMenu(ctx, title, "请勾选要添加为扫描根的目录 (空格勾选，a 全选，q 取消): ", items)
+	if cancelled || len(chosenItems) == 0 {
+		fmt.Println("已取消。")
 		return
 	}
 	added := 0
-	if strings.ToLower(in) == "a" {
-		for i := 0; i < limit; i++ {
-			if ok, _ := config.AddRoot(ctx.cfg, rows[i].root); ok {
+	for _, it := range chosenItems {
+		if rootPath, ok := it.Value.(string); ok && rootPath != "" {
+			if ok, _ := config.AddRoot(ctx.cfg, rootPath); ok {
 				added++
-			}
-		}
-	} else {
-		for _, part := range strings.Split(in, ",") {
-			part = strings.TrimSpace(part)
-			if idx, err := strconv.Atoi(part); err == nil && idx >= 1 && idx <= limit {
-				if ok, _ := config.AddRoot(ctx.cfg, rows[idx-1].root); ok {
-					added++
-				}
 			}
 		}
 	}

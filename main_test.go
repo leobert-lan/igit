@@ -743,6 +743,97 @@ func TestCmdTagInTagScope(t *testing.T) {
 	}
 }
 
+func TestCmdTagInDirectoryScopeFlow(t *testing.T) {
+	tmpDir := t.TempDir()
+	stPath := filepath.Join(tmpDir, "state.json")
+	st, err := state.Load(stPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p1 := filepath.Join(tmpDir, "r1")
+	p2 := filepath.Join(tmpDir, "r2")
+	p3 := filepath.Join(tmpDir, "r3")
+	r1 := &state.Repo{ID: util.NormalizePath(p1), Path: p1, Name: "r1", Kind: "repo"}
+	r2 := &state.Repo{ID: util.NormalizePath(p2), Path: p2, Name: "r2", Kind: "repo"}
+	r3 := &state.Repo{ID: util.NormalizePath(p3), Path: p3, Name: "r3", Kind: "repo"}
+	st.Repos = append(st.Repos, r1, r2, r3)
+	_ = st.Save()
+
+	res, err := scope.Resolve(scope.Scope{Source: scope.SourceRoot}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &appCtx{state: st, res: res, repl: true}
+
+	// 1. 无标签状态下：tag 弹出空状态菜单，按 + 新建标签 feature，并多选仓库 1 和 2 打标
+	inputSeq1 := "+\nfeature\n1 2\n"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader(inputSeq1))
+	code := cmdTag(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("空状态下新建标签失败: %d", code)
+	}
+	if !hasTag(r1, "feature") || !hasTag(r2, "feature") || hasTag(r3, "feature") {
+		t.Fatalf("批量新建标签打标结果异常: r1=%v, r2=%v, r3=%v", r1.Tags, r2.Tags, r3.Tags)
+	}
+
+	// 2. 有标签状态下：tag 弹出标签一级菜单 (选择 1: feature)，进入二级菜单 (选择 1: 添加仓库)，候选池中只有 r3 (选择 1)
+	inputSeq2 := "1\n1\n1\n"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader(inputSeq2))
+	code = cmdTag(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("添加仓库到标签执行失败: %d", code)
+	}
+	if !hasTag(r3, "feature") {
+		t.Fatalf("未能成功将 r3 加入 feature: %+v", r3.Tags)
+	}
+
+	// 3. 从标签移出仓库：选择 1(feature) -> 选择 2(从此标签移出) -> 选择 1(移出第 1 个仓库)
+	inputSeq3 := "1\n2\n1\n"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader(inputSeq3))
+	code = cmdTag(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("从标签移出仓库执行失败: %d", code)
+	}
+	// 原本 3 个仓库都有 feature，移出 1 个后应只剩 2 个仓库拥有 feature
+	featureCount := 0
+	for _, r := range []*state.Repo{r1, r2, r3} {
+		if hasTag(r, "feature") {
+			featureCount++
+		}
+	}
+	if featureCount != 2 {
+		t.Fatalf("移出仓库后计数异常，期望 2，实际: %d", featureCount)
+	}
+
+	// 4. 全局删除标签取消测试：选择 1(feature) -> 选择 3(删除该标签) -> n 取消
+	inputSeq4 := "1\n3\nn\n"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader(inputSeq4))
+	code = cmdTag(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("删除标签取消流程失败: %d", code)
+	}
+	if len(allTagNames(ctx)) != 1 {
+		t.Fatalf("取消删除后标签不应丢失: %+v", allTagNames(ctx))
+	}
+
+	// 5. 全局删除标签确认测试：选择 1(feature) -> 选择 3(删除该标签) -> y 确认
+	inputSeq5 := "1\n3\ny\n"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader(inputSeq5))
+	code = cmdTag(ctx, parseArgs([]string{}))
+	if code != 0 {
+		t.Fatalf("删除标签确认流程失败: %d", code)
+	}
+	if len(allTagNames(ctx)) != 0 {
+		t.Fatalf("彻底删除后标签仍存在: %+v", allTagNames(ctx))
+	}
+	for _, r := range []*state.Repo{r1, r2, r3} {
+		if hasTag(r, "feature") {
+			t.Fatalf("仓库 %s 仍残留 feature 标签", r.Name)
+		}
+	}
+}
+
 func TestCmdLsDisplaysGroupAndTags(t *testing.T) {
 	tmpDir := t.TempDir()
 	stPath := filepath.Join(tmpDir, "state.json")

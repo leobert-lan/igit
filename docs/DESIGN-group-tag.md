@@ -162,7 +162,8 @@
 - 键入 `tag rm`：列出当前标签下的所有仓库编号，按数字即可直接剥离该标签。
 
 ### 4.3 全局与目录视角下的标签命令
-- 键入 `tag`：输出全盘所有标签的统计量与引导提示；
+- 键入 `tag`：呼出交互式标签管理向导（`pickTagActionInDirectoryScope`），提供空状态新建向导、一级标签统计列表与二级标签管理面板（批量加仓、批量移仓、全局删除标签带 y/N 确认）；
+- 键入 `tag list` / `tag ls`：纯文本静态输出全盘所有标签的统计量与引导提示；
 - 键入 `tag <仓库名>`：自动解析仓库并打开该仓库的交互式复选打标面板；
 - 键入 `lsbytag`：进入响应式多维分面标签漏斗检索，多选过滤并直达目标仓库。
 
@@ -189,12 +190,12 @@ Priority 3: NodeGroup (分组作用域 group:xxx)
     ▼
 Priority 4: NodeDir (目录作用域 file:xxx)
     │  ├─ group        -> pickGroupActionInDirectoryScope (目录作用域交互式分组管理向导)
-    │  ├─ tag          -> 全局/目录视角（提示或指定仓库语法）
+    │  ├─ tag          -> pickTagActionInDirectoryScope (目录作用域交互式标签管理向导)
     │  └─ hide/fold .  -> 隐藏/折叠当前目录
     ▼
 Priority 5: NodeRoot (全局根目录 /)
     │  ├─ group        -> pickGroupActionInDirectoryScope (全局交互式分组管理向导)
-    └─ tag             -> 列出全集元数据统计与操作引导指南
+    └─ tag             -> pickTagActionInDirectoryScope (全局交互式标签管理向导)
 ```
 
 ---

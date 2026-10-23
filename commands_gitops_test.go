@@ -114,7 +114,6 @@ func TestCmdCommitCleanCheck(t *testing.T) {
 	}
 }
 
-
 func TestRemoteTokenAESEncryption(t *testing.T) {
 	dir := t.TempDir()
 	_ = exec.Command("git", "init", dir).Run()
@@ -267,5 +266,57 @@ func TestRemoteInteractiveCenterAndPrompts(t *testing.T) {
 	}
 	if recoveredHost := ctx.cfg.GetHostToken(hostDomain); recoveredHost != hostSecret {
 		t.Fatalf("expected host token %s, got %s", hostSecret, recoveredHost)
+	}
+}
+
+func TestMultiRemoteInteractiveSelection(t *testing.T) {
+	dir := t.TempDir()
+	_ = exec.Command("git", "init", dir).Run()
+	_ = exec.Command("git", "-C", dir, "remote", "add", "origin", "https://github.com/foo/bar.git").Run()
+	_ = exec.Command("git", "-C", dir, "remote", "add", "backup", "https://gitlab.com/foo/bar.git").Run()
+
+	r := &state.Repo{
+		ID:   util.NormalizePath(dir),
+		Path: dir,
+		Name: "test_multi_remote_repo",
+	}
+	st := &state.State{Repos: []*state.Repo{r}}
+	sc, _ := scope.Parse("file:" + dir)
+	res, _ := scope.Resolve(sc, st)
+
+	cfg := config.Default()
+	cfgPath := t.TempDir() + "/config.json"
+	ctx := &appCtx{
+		state:   st,
+		res:     res,
+		cfg:     cfg,
+		cfgPath: cfgPath,
+		repl:    true,
+	}
+
+	// 1. 测试在有多个远端时（git 按字母排序: 1 为 backup, 2 为 origin），
+	// remote token 通过 selectMenu 选择远端 1 (backup) 并输入 token
+	backupSecret := "glpat_backup_secret_999"
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("1\n" + backupSecret + "\n"))
+	code := cmdRemote(ctx, args{pos: []string{"token"}})
+	if code != 0 {
+		t.Fatalf("cmdRemote interactive multi-remote token expected 0, got %d", code)
+	}
+	if tok := ctx.cfg.ResolveToken(r.ID, "backup", "gitlab.com"); tok != backupSecret {
+		t.Fatalf("expected backup token %s, got %s", backupSecret, tok)
+	}
+	// origin 应该没有 token
+	if origTok := ctx.cfg.ResolveToken(r.ID, "origin", "github.com"); origTok != "" {
+		t.Fatalf("expected origin token empty, got %s", origTok)
+	}
+
+	// 2. 测试 remote clear-token 通过 selectMenu 选择远端 1 (backup)
+	ctx.pipeScanner = bufio.NewScanner(strings.NewReader("1\n"))
+	code = cmdRemote(ctx, args{pos: []string{"clear-token"}})
+	if code != 0 {
+		t.Fatalf("cmdRemote interactive multi-remote clear-token expected 0, got %d", code)
+	}
+	if tok := ctx.cfg.GetRepoToken(r.ID, "backup"); tok != "" {
+		t.Fatalf("expected backup token to be cleared, got %s", tok)
 	}
 }
